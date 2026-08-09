@@ -1,0 +1,1 @@
+{"version":3,"file":"RoutingService.d.ts","sourceRoot":"","sources":["../../src/services/RoutingService.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,UAAU,EAAE,KAAK,EAAE,MAAM,sBAAsB,CAAC;AAEzD,qBAAa,cAAc;IACZ,QAAQ,CACnB,KAAK,EAAE,KAAK,EACZ,GAAG,EAAE,KAAK,GACT,OAAO,CAAC,UAAU,CAAC;CAyBvB"}

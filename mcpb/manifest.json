@@ -1,0 +1,19 @@
+{
+  "manifest_version": "0.4",
+  "name": "map-renderer",
+  "display_name": "Map Renderer",
+  "version": "0.1.0",
+  "description": "MCP map renderer that creates markers, paths, polygons, and renders map scenes.",
+  "author": {
+    "name": "GPT-MAPS"
+  },
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/index.js"],
+      "env": {}
+    }
+  }
+}

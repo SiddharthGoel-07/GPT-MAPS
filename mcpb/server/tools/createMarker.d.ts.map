@@ -1,0 +1,1 @@
+{"version":3,"file":"createMarker.d.ts","sourceRoot":"","sources":["../../src/tools/createMarker.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,SAAS,EAAE,MAAM,8BAA8B,CAAC;AAGzD,OAAO,EAAE,cAAc,EAAE,MAAM,sBAAsB,CAAC;AACtD,OAAO,EAAE,gBAAgB,EAAE,MAAM,iCAAiC,CAAC;AAQnE,wBAAgB,wBAAwB,CACtC,MAAM,EAAE,SAAS,EACjB,OAAO,EAAE,cAAc,EACvB,gBAAgB,EAAE,gBAAgB,GACjC,IAAI,CAsCN"}
