@@ -70,21 +70,26 @@ async function handleChat(prompt: string): Promise<ChatResponse> {
     );
 
     const messages: Array<Record<string, unknown>> = [
-      {
-        role: "system",
-        content:
-          "You are a map assistant. Use the provided tools to build a map scene.\n" +
-          "1. Use createMarker with a 'location' parameter for each place\n" +
-          "2. Use createPath with 'start' and 'end' locations to connect markers\n" +
-          "3. Use createPolygon with a 'location' to mark boundaries\n" +
-          "4. Call renderScene last to finalize the scene\n" +
-          "Always use the provided tools and provide valid JSON arguments.",
-      },
-      {
-        role: "user",
-        content: prompt,
-      },
-    ];
+  {
+    role: "system",
+    content:
+      "You are a map assistant. Use the provided tools to build a map scene.\n" +
+      "\n" +
+      "Rules:\n" +
+      "1. Follow the user's request exactly. Do not add map objects or actions that the user did not request.\n" +
+      "2. If the user asks to mark/show a location, use only createMarker for that location. Do not create paths or polygons unless explicitly requested.\n" +
+      "3. Use createMarker with a 'location' parameter for each explicitly requested place.\n" +
+      "4. Use createPath with 'start' and 'end' only when the user explicitly asks to connect locations or draw a route/path between them.\n" +
+      "5. Use createPolygon with a 'location' only when the user explicitly asks to show/mark a boundary or area.\n" +
+      "6. Do not infer additional locations, routes, boundaries, or relationships from the user's request.\n" +
+      "7. Call renderScene last, after completing all requested map operations.\n" +
+      "8. Always use the provided tools and provide valid JSON arguments.",
+  },
+  {
+    role: "user",
+    content: prompt,
+  },
+];
 
     let finalContent = "";
     let serializedScene: object | null = null;
