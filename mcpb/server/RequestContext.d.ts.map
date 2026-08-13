@@ -1,1 +1,0 @@
-{"version":3,"file":"RequestContext.d.ts","sourceRoot":"","sources":["../src/RequestContext.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,KAAK,EAAE,YAAY,EAAE,MAAM,sBAAsB,CAAC;AAE3D,qBAAa,cAAc;IACzB,SAAgB,KAAK,EAAE,KAAK,CAAC;IAC7B,SAAgB,YAAY,EAAE,YAAY,CAAC;;CAM5C"}

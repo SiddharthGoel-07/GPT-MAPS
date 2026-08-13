@@ -4,5 +4,13 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
-  base: "./"
+  base: "./",
+  server: {
+    proxy: {
+      "/api": {
+        target: "http://127.0.0.1:3002",
+        changeOrigin: true,
+      },
+    },
+  },
 });

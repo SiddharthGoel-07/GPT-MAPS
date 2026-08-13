@@ -32,13 +32,6 @@ export class MapRenderer {
   }
 
   public render(scene: Scene): void {
-    this.renderWithCountryContext(scene, null);
-  }
-
-  public renderWithCountryContext(
-    scene: Scene,
-    countryBounds: Record<string, { minLat: number; maxLat: number; minLon: number; maxLon: number }> | null
-  ): void {
     if (!this.isMapLoaded) {
       this.pendingScene = scene;
       return;
@@ -56,7 +49,7 @@ export class MapRenderer {
       }
     }
 
-    this.fitCameraToScene(scene, countryBounds);
+    this.fitCameraToScene(scene);
   }
 
   private clearMap(): void {
@@ -187,10 +180,7 @@ export class MapRenderer {
     this.renderedPolygons.add(polygon.id);
   }
 
-  private fitCameraToScene(
-    scene: Scene,
-    countryBounds: Record<string, { minLat: number; maxLat: number; minLon: number; maxLon: number }> | null
-  ): void {
+  private fitCameraToScene(scene: Scene): void {
     const bounds = new maplibregl.LngLatBounds();
 
     let hasBounds = false;
@@ -210,17 +200,6 @@ export class MapRenderer {
       } else if (object instanceof Polygon) {
         for (const point of object.geometry.points) {
           bounds.extend([point.longitude, point.latitude]);
-          hasBounds = true;
-        }
-      }
-    }
-
-    if (countryBounds) {
-      for (const country of Object.keys(countryBounds)) {
-        const bbox = countryBounds[country];
-        if (bbox) {
-          bounds.extend([bbox.minLon, bbox.minLat]);
-          bounds.extend([bbox.maxLon, bbox.maxLat]);
           hasBounds = true;
         }
       }

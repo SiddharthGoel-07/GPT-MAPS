@@ -10,22 +10,16 @@ import {
 } from "@map-renderer/shared";
 
 export class SceneDeserializer {
-  public deserialize(serializedScene: object): { scene: Scene; countryBounds: Record<string, { minLat: number; maxLat: number; minLon: number; maxLon: number }> | null } {
+  public deserialize(serializedScene: object): Scene {
     const scene = new Scene();
     const sceneBuilder = new SceneBuilder(scene);
-    const parsed = serializedScene as {
-      objects?: unknown[];
-      countryBounds?: Record<string, { minLat: number; maxLat: number; minLon: number; maxLon: number }>;
-    };
-    const objects = parsed.objects ?? [];
-    const countryBounds = parsed.countryBounds ?? null;
+    const objects = (serializedScene as { objects?: unknown[] }).objects ?? [];
 
     for (const object of objects) {
       const item = object as {
         type?: string;
         id?: string;
         visible?: boolean;
-        country?: string;
         style?: {
           color?: string;
           opacity?: number;
@@ -73,8 +67,7 @@ export class SceneDeserializer {
           new Point(
             item.geometry?.latitude ?? 0,
             item.geometry?.longitude ?? 0
-          ),
-          item.country
+          )
         );
         continue;
       }
@@ -113,6 +106,6 @@ export class SceneDeserializer {
       }
     }
 
-    return { scene, countryBounds };
+    return scene;
   }
 }

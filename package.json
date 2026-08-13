@@ -10,7 +10,10 @@
     "build": "npm run --workspaces --if-present build",
     "lint": "npm run --workspaces --if-present lint",
     "format": "npm run --workspaces --if-present format",
-    "dev": "npm run --workspaces --if-present dev"
+    "dev": "npm run --workspaces --if-present dev",
+    "dev:server": "npm run dev --workspace @map-renderer/server",
+    "dev:ai": "npm run dev --workspace @map-renderer/ai-server",
+    "dev:web": "npm run dev --workspace @map-renderer/web"
   },
   "devDependencies": {
     "@eslint/js": "^9.31.0",

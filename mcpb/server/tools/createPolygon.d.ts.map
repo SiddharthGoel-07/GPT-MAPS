@@ -1,1 +1,0 @@
-{"version":3,"file":"createPolygon.d.ts","sourceRoot":"","sources":["../../src/tools/createPolygon.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,SAAS,EAAE,MAAM,8BAA8B,CAAC;AAGzD,OAAO,EAAE,cAAc,EAAE,MAAM,sBAAsB,CAAC;AACtD,OAAO,EAAE,eAAe,EAAE,MAAM,gCAAgC,CAAC;AAQjE,wBAAgB,yBAAyB,CACvC,MAAM,EAAE,SAAS,EACjB,OAAO,EAAE,cAAc,EACvB,eAAe,EAAE,eAAe,GAC/B,IAAI,CAmCN"}

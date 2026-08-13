@@ -24,8 +24,7 @@ export class SceneBuilder {
     style: Style,
     metadata: Metadata,
     animation: Animation,
-    geometry: Point,
-    country?: string
+    geometry: Point
   ): Marker {
     const marker = new Marker(
       id,
@@ -33,8 +32,7 @@ export class SceneBuilder {
       style,
       metadata,
       animation,
-      geometry,
-      country
+      geometry
     );
 
     this.scene.addObject(marker);

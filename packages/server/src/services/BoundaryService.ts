@@ -51,53 +51,6 @@ export class BoundaryService {
     return new PolygonGeometry(points);
   }
 
-  public async getCountryBounds(
-    country: string
-  ): Promise<{ minLat: number; maxLat: number; minLon: number; maxLon: number } | null> {
-    const params = new URLSearchParams({
-      q: country,
-      format: "geojson",
-      polygon_geojson: "1",
-      limit: "1",
-    });
-
-    const url = `https://nominatim.openstreetmap.org/search?${params}`;
-
-    try {
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": "map-renderer-mcp/0.1.0",
-        },
-      });
-
-      if (!response.ok) {
-        return null;
-      }
-
-      const data = await response.json();
-
-      if (!data.features || data.features.length === 0) {
-        return null;
-      }
-
-      const feature = data.features[0];
-      const bbox = feature.bbox;
-
-      if (!bbox || bbox.length < 4) {
-        return null;
-      }
-
-      return {
-        minLon: bbox[0],
-        minLat: bbox[1],
-        maxLon: bbox[2],
-        maxLat: bbox[3],
-      };
-    } catch {
-      return null;
-    }
-  }
-
   private extractPoints(geometry: any): Point[] {
     const points: Point[] = [];
 

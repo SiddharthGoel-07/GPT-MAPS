@@ -18,16 +18,14 @@ export function registerCreateMarkerTool(
   server.registerTool(
     "createMarker",
     {
-      description:
-        "Create a marker on the map. If the location is a recognizable land location, provide its country as a view-context hint (for example, Delhi -> India, Paris -> France, Tokyo -> Japan). If the country is uncertain, use the best-known country only when reasonably confident. If the location is not meaningfully associated with a country (for example, an ocean location, open sea, or ambiguous geographic point), use 'VAGUE'. Do not fabricate a country. The country value only affects the camera view and does not change the marker's coordinates.",
+      description: "Create a marker on the map.",
 
       inputSchema: z.object({
         location: z.string(),
-        country: z.string().optional(),
       }),
     },
 
-    async ({ location, country }) => {
+    async ({ location }) => {
       const point = await geocodingService.getCoordinates(location);
 
       context.sceneBuilder.createMarker(
@@ -36,8 +34,7 @@ export function registerCreateMarkerTool(
         new Style("#ff0000", 1, 2),
         new Metadata(location, ""),
         new Animation(false, 0),
-        point,
-        country
+        point
       );
 
       

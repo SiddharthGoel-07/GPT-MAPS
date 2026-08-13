@@ -1,1 +1,0 @@
-{"version":3,"file":"renderScene.d.ts","sourceRoot":"","sources":["../../src/tools/renderScene.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,SAAS,EAAE,MAAM,8BAA8B,CAAC;AAEzD,OAAO,EAAE,cAAc,EAAE,MAAM,sBAAsB,CAAC;AACtD,OAAO,EAAE,eAAe,EAAE,MAAM,uBAAuB,CAAC;AAGxD,wBAAgB,uBAAuB,CACrC,MAAM,EAAE,SAAS,EACjB,OAAO,EAAE,cAAc,EACvB,eAAe,EAAE,eAAe,GAC/B,IAAI,CA2BN"}

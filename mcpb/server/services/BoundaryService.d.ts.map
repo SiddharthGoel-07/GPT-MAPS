@@ -1,1 +1,0 @@
-{"version":3,"file":"BoundaryService.d.ts","sourceRoot":"","sources":["../../src/services/BoundaryService.ts"],"names":[],"mappings":"AAAA,OAAO,EAAS,eAAe,EAAE,MAAM,sBAAsB,CAAC;AAE9D,qBAAa,eAAe;IACb,WAAW,CACtB,QAAQ,EAAE,MAAM,GACf,OAAO,CAAC,eAAe,CAAC;IAgD3B,OAAO,CAAC,aAAa;CAsBtB"}
