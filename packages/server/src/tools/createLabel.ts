@@ -10,45 +10,51 @@ import {
   Style,
 } from "@map-renderer/shared";
 
-export function registerCreateMarkerTool(
+export function registerCreateLabelTool(
   server: McpServer,
   context: RequestContext,
   geocodingService: GeocodingService
 ): void {
   server.registerTool(
-    "createMarker",
+    "createLabel",
     {
-      description: "Create a marker on the map.",
+      description: "Create a text label on the map at a location.",
 
       inputSchema: z.object({
         location: z.string(),
+        text: z.string(),
         style: z
           .object({
             color: z.string().optional(),
-            size: z.number().optional(),
+            fontSize: z.number().optional(),
+            fontWeight: z.string().optional(),
             opacity: z.number().min(0).max(1).optional(),
+            backgroundColor: z.string().optional(),
           })
           .optional(),
       }),
     },
 
-    async ({ location, style }) => {
+    async ({ location, text, style }) => {
       const point = await geocodingService.getCoordinates(location);
 
-      context.sceneBuilder.createMarker(
+      context.sceneBuilder.createLabel(
         crypto.randomUUID(),
         true,
         new Style(
-          style?.color ?? "#ff0000",
+          style?.color ?? "#000000",
           style?.opacity ?? 1,
-          2,
+          1,
           {
-            size: style?.size,
+            fontSize: style?.fontSize,
+            fontWeight: style?.fontWeight,
+            backgroundColor: style?.backgroundColor,
           }
         ),
         new Metadata(location, ""),
         new Animation(false, 0),
-        point
+        point,
+        text
       );
 
       console.error(context.scene);

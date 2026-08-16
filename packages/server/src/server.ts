@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/server";
+import { registerCreateLabelTool } from "./tools/createLabel.js";
 import { registerCreateMarkerTool } from "./tools/createMarker.js";
 import { registerCreatePathTool } from "./tools/createPath.js";
 import { registerCreatePolygonTool } from "./tools/createPolygon.js";
@@ -32,6 +33,7 @@ export function createServer(): McpServer {
     context.reset();
   };
 
+  registerCreateLabelTool(server, context, geocodingService);
   registerCreateMarkerTool(server, context, geocodingService);
   registerCreatePathTool(server, context, geocodingService, routingService);
   registerCreatePolygonTool(server, context, boundaryService);

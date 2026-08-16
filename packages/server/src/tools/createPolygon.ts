@@ -22,16 +22,36 @@ export function registerCreatePolygonTool(
 
       inputSchema: z.object({
         location: z.string(),
+        style: z
+          .object({
+            fillColor: z.string().optional(),
+            fillOpacity: z.number().min(0).max(1).optional(),
+            borderColor: z.string().optional(),
+            borderWidth: z.number().optional(),
+            borderDash: z.boolean().optional(),
+          })
+          .optional(),
       }),
     },
 
-    async ({ location }) => {
+    async ({ location, style }) => {
       const polygon = await boundaryService.getBoundary(location);
 
       context.sceneBuilder.createPolygon(
         crypto.randomUUID(),
         true,
-        new Style("#00aa00", 0.4, 2),
+        new Style(
+          style?.fillColor ?? "#00aa00",
+          style?.fillOpacity ?? 0.4,
+          style?.borderWidth ?? 2,
+          {
+            fillColor: style?.fillColor,
+            fillOpacity: style?.fillOpacity,
+            borderColor: style?.borderColor,
+            borderWidth: style?.borderWidth,
+            borderDash: style?.borderDash,
+          }
+        ),
         new Metadata(location, ""),
         new Animation(false, 0),
         polygon

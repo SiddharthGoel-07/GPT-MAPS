@@ -1,5 +1,6 @@
 import {
   Animation,
+  Label,
   Metadata,
   Point,
   Scene,
@@ -24,6 +25,18 @@ export class SceneDeserializer {
           color?: string;
           opacity?: number;
           width?: number;
+          options?: {
+            size?: number;
+            dash?: boolean;
+            fillColor?: string;
+            fillOpacity?: number;
+            borderColor?: string;
+            borderWidth?: number;
+            borderDash?: boolean;
+            fontSize?: number;
+            fontWeight?: string;
+            backgroundColor?: string;
+          };
         };
         metadata?: {
           name?: string;
@@ -41,12 +54,25 @@ export class SceneDeserializer {
             longitude?: number;
           }>;
         };
+        text?: string;
       };
 
       const style = new Style(
         item.style?.color ?? "#000000",
         item.style?.opacity ?? 1,
-        item.style?.width ?? 1
+        item.style?.width ?? 1,
+        {
+          size: item.style?.options?.size,
+          dash: item.style?.options?.dash,
+          fillColor: item.style?.options?.fillColor,
+          fillOpacity: item.style?.options?.fillOpacity,
+          borderColor: item.style?.options?.borderColor,
+          borderWidth: item.style?.options?.borderWidth,
+          borderDash: item.style?.options?.borderDash,
+          fontSize: item.style?.options?.fontSize,
+          fontWeight: item.style?.options?.fontWeight,
+          backgroundColor: item.style?.options?.backgroundColor,
+        }
       );
       const metadata = new Metadata(
         item.metadata?.name ?? "",
@@ -102,6 +128,22 @@ export class SceneDeserializer {
               point.longitude ?? 0
             ))
           )
+        );
+        continue;
+      }
+
+      if (item.type === "label") {
+        sceneBuilder.createLabel(
+          item.id ?? crypto.randomUUID(),
+          item.visible ?? true,
+          style,
+          metadata,
+          animation,
+          new Point(
+            item.geometry?.latitude ?? 0,
+            item.geometry?.longitude ?? 0
+          ),
+          item.text ?? ""
         );
       }
     }

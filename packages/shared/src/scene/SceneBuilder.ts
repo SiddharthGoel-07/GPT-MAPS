@@ -4,6 +4,7 @@ import { Style } from "../Style.js";
 import { LineString } from "../geometry/LineString.js";
 import { Point } from "../geometry/Point.js";
 import { PolygonGeometry } from "../geometry/PolygonGeometry.js";
+import { Label } from "../objects/Label.js";
 import { Marker } from "../objects/Marker.js";
 import { Path } from "../objects/Path.js";
 import { Polygon } from "../objects/Polygon.js";
@@ -79,5 +80,28 @@ export class SceneBuilder {
 
     this.scene.addObject(polygon);
     return polygon;
+  }
+
+  createLabel(
+    id: string,
+    visible: boolean,
+    style: Style,
+    metadata: Metadata,
+    animation: Animation,
+    geometry: Point,
+    text: string
+  ): Label {
+    const label = new Label(
+      id,
+      visible,
+      style,
+      metadata,
+      animation,
+      geometry,
+      text
+    );
+
+    this.scene.addObject(label);
+    return label;
   }
 }

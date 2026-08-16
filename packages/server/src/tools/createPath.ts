@@ -25,10 +25,18 @@ export function registerCreatePathTool(
       inputSchema: z.object({
         start: z.string(),
         end: z.string(),
+        style: z
+          .object({
+            color: z.string().optional(),
+            width: z.number().optional(),
+            opacity: z.number().min(0).max(1).optional(),
+            dash: z.boolean().optional(),
+          })
+          .optional(),
       }),
     },
 
-    async ({ start, end }) => {
+    async ({ start, end, style }) => {
       const startPoint = await geocodingService.getCoordinates(start);
       const endPoint = await geocodingService.getCoordinates(end);
 
@@ -40,7 +48,14 @@ export function registerCreatePathTool(
       context.sceneBuilder.createPath(
         crypto.randomUUID(),
         true,
-        new Style("#0066ff", 1, 4),
+        new Style(
+          style?.color ?? "#0066ff",
+          style?.opacity ?? 1,
+          style?.width ?? 4,
+          {
+            dash: style?.dash,
+          }
+        ),
         new Metadata(`${start} → ${end}`, ""),
         new Animation(false, 0),
         line

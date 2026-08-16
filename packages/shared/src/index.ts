@@ -8,6 +8,7 @@ export { LineString } from "./geometry/LineString.js";
 export { PolygonGeometry } from "./geometry/PolygonGeometry.js";
 
 export { DrawableObject } from "./objects/DrawableObject.js";
+export { Label } from "./objects/Label.js";
 export { Marker } from "./objects/Marker.js";
 export { Path } from "./objects/Path.js";
 export { Polygon } from "./objects/Polygon.js";

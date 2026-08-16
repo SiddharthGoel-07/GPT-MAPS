@@ -1,4 +1,5 @@
 import {
+  Label,
   Marker,
   Path,
   Polygon,
@@ -42,6 +43,19 @@ export class SceneSerializer {
             metadata: object.metadata,
             animation: object.animation,
             geometry: object.geometry,
+          };
+        }
+
+        if (object instanceof Label) {
+          return {
+            type: "label",
+            id: object.id,
+            visible: object.visible,
+            style: object.style,
+            metadata: object.metadata,
+            animation: object.animation,
+            geometry: object.geometry,
+            text: object.text,
           };
         }
 

@@ -1,4 +1,4 @@
-import { Marker, Path, Polygon, Scene } from "@map-renderer/shared";
+import { Label, Marker, Path, Polygon, Scene } from "@map-renderer/shared";
 import maplibregl from "maplibre-gl";
 
 export class MapRenderer {
@@ -7,6 +7,7 @@ export class MapRenderer {
   private readonly renderedMarkers = new Map<string, maplibregl.Marker>();
   private readonly renderedPaths = new Set<string>();
   private readonly renderedPolygons = new Set<string>();
+  private readonly renderedLabels = new Map<string, maplibregl.Marker>();
 
   private isMapLoaded = false;
   private pendingScene: Scene | null = null;
@@ -46,6 +47,8 @@ export class MapRenderer {
         this.renderPath(object);
       } else if (object instanceof Polygon) {
         this.renderPolygon(object);
+      } else if (object instanceof Label) {
+        this.renderLabel(object);
       }
     }
 
@@ -57,6 +60,11 @@ export class MapRenderer {
       marker.remove();
     }
     this.renderedMarkers.clear();
+
+    for (const label of this.renderedLabels.values()) {
+      label.remove();
+    }
+    this.renderedLabels.clear();
 
     for (const pathId of this.renderedPaths) {
       if (this.map.getLayer(pathId)) {
@@ -86,12 +94,17 @@ export class MapRenderer {
 
     const mapMarker = new maplibregl.Marker({
       color: marker.style.color,
+      scale: marker.style.options.size ?? 1,
     })
       .setLngLat([
         marker.geometry.longitude,
         marker.geometry.latitude,
       ])
       .addTo(this.map);
+
+    if (marker.style.opacity < 1) {
+      mapMarker.getElement().style.opacity = String(marker.style.opacity);
+    }
 
     this.renderedMarkers.set(marker.id, mapMarker);
   }
@@ -118,15 +131,21 @@ export class MapRenderer {
       },
     });
 
+    const paint: maplibregl.LineLayerSpecification["paint"] = {
+      "line-color": path.style.color,
+      "line-width": path.style.width,
+      "line-opacity": path.style.opacity,
+    };
+
+    if (path.style.options.dash) {
+      paint["line-dasharray"] = [4, 2];
+    }
+
     this.map.addLayer({
       id: path.id,
       type: "line",
       source: path.id,
-      paint: {
-        "line-color": path.style.color,
-        "line-width": path.style.width,
-        "line-opacity": path.style.opacity,
-      },
+      paint,
     });
 
     this.renderedPaths.add(path.id);
@@ -167,17 +186,79 @@ export class MapRenderer {
       },
     });
 
+    const fillColor = polygon.style.options.fillColor ?? polygon.style.color;
+    const fillOpacity = polygon.style.options.fillOpacity ?? polygon.style.opacity;
+
     this.map.addLayer({
       id: polygon.id,
       type: "fill",
       source: polygon.id,
       paint: {
-        "fill-color": polygon.style.color,
-        "fill-opacity": polygon.style.opacity,
+        "fill-color": fillColor,
+        "fill-opacity": fillOpacity,
       },
     });
 
+    // Add a border (line) layer when border styling is requested.
+    const borderColor = polygon.style.options.borderColor;
+    const borderWidth = polygon.style.options.borderWidth;
+    const borderDash = polygon.style.options.borderDash;
+
+    if (
+      borderColor !== undefined ||
+      borderWidth !== undefined ||
+      borderDash !== undefined
+    ) {
+      const borderLayerId = `${polygon.id}-border`;
+      const borderPaint: maplibregl.LineLayerSpecification["paint"] = {
+        "line-color": borderColor ?? fillColor,
+        "line-width": borderWidth ?? 1,
+        "line-opacity": 1,
+      };
+
+      if (borderDash) {
+        borderPaint["line-dasharray"] = [4, 2];
+      }
+
+      this.map.addLayer({
+        id: borderLayerId,
+        type: "line",
+        source: polygon.id,
+        paint: borderPaint,
+      });
+
+      this.renderedPolygons.add(borderLayerId);
+    }
+
     this.renderedPolygons.add(polygon.id);
+  }
+
+  private renderLabel(label: Label): void {
+    if (this.renderedLabels.has(label.id)) {
+      return;
+    }
+
+    const element = document.createElement("div");
+    element.textContent = label.text;
+    element.style.color = label.style.color;
+    element.style.fontSize = `${label.style.options.fontSize ?? 14}px`;
+    element.style.fontWeight = label.style.options.fontWeight ?? "normal";
+    element.style.opacity = String(label.style.opacity);
+    element.style.backgroundColor =
+      label.style.options.backgroundColor ?? "rgba(255, 255, 255, 0.7)";
+    element.style.padding = "2px 6px";
+    element.style.borderRadius = "4px";
+    element.style.whiteSpace = "nowrap";
+    element.style.transform = "translate(-50%, -100%)";
+
+    const mapMarker = new maplibregl.Marker({ element })
+      .setLngLat([
+        label.geometry.longitude,
+        label.geometry.latitude,
+      ])
+      .addTo(this.map);
+
+    this.renderedLabels.set(label.id, mapMarker);
   }
 
   private fitCameraToScene(scene: Scene): void {
@@ -202,6 +283,12 @@ export class MapRenderer {
           bounds.extend([point.longitude, point.latitude]);
           hasBounds = true;
         }
+      } else if (object instanceof Label) {
+        bounds.extend([
+          object.geometry.longitude,
+          object.geometry.latitude,
+        ]);
+        hasBounds = true;
       }
     }
 
@@ -218,6 +305,12 @@ export class MapRenderer {
     }
 
     this.renderedMarkers.clear();
+
+    for (const label of this.renderedLabels.values()) {
+      label.remove();
+    }
+
+    this.renderedLabels.clear();
 
     for (const pathId of this.renderedPaths) {
       if (this.map.getLayer(pathId)) {
