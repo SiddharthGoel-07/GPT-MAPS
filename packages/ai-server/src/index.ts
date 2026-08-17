@@ -38,14 +38,17 @@ console.log(
   `[AI] Loaded ${groqApiKeys.length} Groq API key(s).`
 );
 
-const MCP_SERVER_URL = process.env.MCP_SERVER_URL;
-
-if (!MCP_SERVER_URL) {
-  console.error(
-    "MCP_SERVER_URL environment variable is required."
-  );
-  process.exit(1);
+function getMcpServerUrl(): string {
+  const url = process.env.MCP_SERVER_URL;
+  if (!url) {
+    throw new Error(
+      "MCP_SERVER_URL environment variable is required."
+    );
+  }
+  return url;
 }
+
+const MCP_SERVER_URL = getMcpServerUrl();
 
 const MODEL =
   process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
@@ -68,8 +71,8 @@ interface ChatResponse {
 async function callGroq(
   request: Parameters<
     Groq["chat"]["completions"]["create"]
-  >[0]
-) {
+  >[0] & { stream?: false }
+): Promise<Groq.Chat.Completions.ChatCompletion> {
   let lastError: unknown = null;
 
   for (let i = 0; i < groqApiKeys.length; i++) {
@@ -419,9 +422,16 @@ async function handleChat(
                  * Do not make another Groq request.
                  */
 
+                const scene = serializedScene;
+
+                if (!scene) {
+                  throw new Error(
+                    "Scene was not captured."
+                  );
+                }
+
                 return {
-                  scene:
-                    serializedScene,
+                  scene,
                   message:
                     finalContent ||
                     "Scene rendered.",
@@ -576,8 +586,10 @@ async function handleChat(
       );
     }
 
+    const scene = serializedScene;
+
     return {
-      scene: serializedScene,
+      scene,
       message:
         finalContent ||
         "Scene rendered.",
