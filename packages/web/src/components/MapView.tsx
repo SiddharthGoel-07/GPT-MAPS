@@ -37,7 +37,10 @@ export function MapView() {
     setMessage("");
 
     try {
-      const response = await fetch("/api/chat", {
+      const AI_SERVER_URL =
+        import.meta.env.VITE_AI_SERVER_URL || "";
+
+      const response = await fetch(`${AI_SERVER_URL}/api/chat`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
