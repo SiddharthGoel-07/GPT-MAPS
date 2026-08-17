@@ -15,6 +15,13 @@ async function main() {
   const httpServer = createHttpServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+      
+      if (url.pathname === "/health" || url.pathname === "/") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+        return;
+      }
+      // -----------------------------------
 
       if (url.pathname !== "/mcp") {
         res.writeHead(404, { "Content-Type": "application/json" });
