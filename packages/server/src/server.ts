@@ -11,7 +11,8 @@ import { SceneSerializer } from "./SceneSerializer.js";
 
 import { RequestContext } from "./RequestContext.js";
 
-const context = new RequestContext();
+// Stateless, safe to share between sessions. Scene state is NOT shared:
+// every createServer() call builds its own RequestContext (see below).
 const geocodingService = new GeocodingService();
 const routingService = new RoutingService();
 const boundaryService = new BoundaryService();
@@ -23,15 +24,10 @@ export function createServer(): McpServer {
     version: "0.1.0",
   });
 
-  // The AI server creates a NEW MCP client for every independent chat
-  // request. Each new client completes the `initialize` handshake, which
-  // fires `oninitialized` on the underlying Server. Resetting the
-  // RequestContext here guarantees that every independent request starts
-  // with a fresh Scene, while all tool calls belonging to that request
-  // share the same Scene via the shared context.
-  server.server.oninitialized = () => {
-    context.reset();
-  };
+  // One RequestContext (= one Scene) per McpServer instance, and index.ts
+  // creates exactly one McpServer per MCP session. Scene isolation therefore
+  // follows session isolation; no reset hooks, no shared mutable state.
+  const context = new RequestContext();
 
   registerCreateLabelTool(server, context, geocodingService);
   registerCreateMarkerTool(server, context, geocodingService);

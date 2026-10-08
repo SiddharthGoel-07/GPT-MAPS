@@ -207,7 +207,7 @@ async function handleChat(
           "7. Never create duplicate labels for the same geographic feature.\n" +
           "8. Label text must describe the actual geographic feature. Never use placeholder, random, malformed, or meaningless text such as 'label', 'labels', 'labekls', 'text', etc.\n" +
           "9. Keep label text concise and useful. Prefer the actual place or region name unless the user explicitly requests different text.\n" +
-          "10. Complete each requested operation ONCE. Before calling a tool, check whether that exact feature has already been created. Never repeat an identical tool call.\n" +
+          "10. Complete each requested operation ONCE. Before calling a tool, check whether that exact feature has already been created. Never repeat an identical tool call.Dont at all repeat same tool call , just dont do it\n" +
 
           "\nTOOL RULES:\n" +
           "11. Use createMarker with a 'location' parameter for places that should be represented as point markers.\n" +
