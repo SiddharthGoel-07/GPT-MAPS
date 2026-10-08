@@ -10,7 +10,7 @@ export class RoutingService {
       `${start.longitude},${start.latitude};${end.longitude},${end.latitude}` +
       `?overview=full&geometries=geojson`;
 
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
 
     if (!response.ok) {
       throw new Error("Failed to fetch route.");

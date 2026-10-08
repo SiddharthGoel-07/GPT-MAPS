@@ -1,0 +1,1193 @@
+diff --git a/packages/server/src/RequestContext.ts b/packages/server/src/RequestContext.ts
+index 1ff41bd..df5acbe 100644
+--- a/packages/server/src/RequestContext.ts
++++ b/packages/server/src/RequestContext.ts
+@@ -15,6 +15,14 @@ export class RequestContext {
+   public scene: Scene;
+   public sceneBuilder: SceneBuilder;
+ 
++  /**
++   * De-duplication index for this scene: semantic key -> object id.
++   * Keys are built from coordinates (see sceneOps.ts), so "Delhi" and
++   * "New Delhi, India" resolve to the same marker. Must always be kept in
++   * sync with `scene`; reset() clears it.
++   */
++  public readonly keys = new Map<string, string>();
++
+   constructor() {
+     this.scene = new Scene();
+     this.sceneBuilder = new SceneBuilder(this.scene);
+@@ -28,6 +36,7 @@ export class RequestContext {
+    * these via the context object reference at call time.
+    */
+   public reset(): void {
++    this.keys.clear();
+     this.scene = new Scene();
+     this.sceneBuilder = new SceneBuilder(this.scene);
+   }
+diff --git a/packages/server/src/sceneOps.ts b/packages/server/src/sceneOps.ts
+new file mode 100644
+index 0000000..02f2b76
+--- /dev/null
++++ b/packages/server/src/sceneOps.ts
+@@ -0,0 +1,339 @@
++import {
++  Animation,
++  Label,
++  LineString,
++  Metadata,
++  Point,
++  PolygonGeometry,
++  Style,
++} from "@map-renderer/shared";
++import type { RequestContext } from "./RequestContext.js";
++
++/*
++ * Every rule about what a valid scene looks like lives HERE, in code, instead
++ * of in the LLM prompt:
++ *  - idempotency: the same feature added twice is added once
++ *  - one label per physical spot (explicit text overrides auto text)
++ *  - style values are clamped / sanitised so a bad value can never break the map
++ *  - hard cap on scene size
++ * All functions return a short text for the model describing what happened.
++ */
++
++const envInt = (name: string, fallback: number): number => {
++  const n = Number(process.env[name]);
++  return Number.isFinite(n) && n > 0 ? n : fallback;
++};
++
++export const MAX_SCENE_OBJECTS = envInt("MAX_SCENE_OBJECTS", 100);
++const MAX_LABEL_LENGTH = 80;
++
++/* ----------------------------- sanitising ------------------------------ */
++
++const NAMED_COLORS = new Set([
++  "black", "white", "red", "green", "blue", "yellow", "orange", "purple",
++  "pink", "brown", "gray", "grey", "cyan", "magenta", "teal", "navy",
++  "maroon", "olive", "lime", "aqua", "silver", "gold", "indigo", "violet",
++  "crimson", "coral", "salmon", "turquoise", "darkgreen", "darkblue",
++  "darkred", "lightblue", "lightgreen", "transparent",
++]);
++
++const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
++const FUNC_COLOR = /^(?:rgb|rgba|hsl|hsla)\([0-9.,%\s/-]+\)$/i;
++
++function color(value: string | undefined, fallback: string, name: string, notes: string[]): string {
++  if (value === undefined) return fallback;
++  const v = value.trim();
++  if (HEX_COLOR.test(v) || FUNC_COLOR.test(v) || NAMED_COLORS.has(v.toLowerCase())) return v;
++  notes.push(`${name} "${value}" is not a valid color, used ${fallback}`);
++  return fallback;
++}
++
++function optionalColor(value: string | undefined, name: string, notes: string[]): string | undefined {
++  if (value === undefined) return undefined;
++  const v = value.trim();
++  if (HEX_COLOR.test(v) || FUNC_COLOR.test(v) || NAMED_COLORS.has(v.toLowerCase())) return v;
++  notes.push(`${name} "${value}" is not a valid color, ignored`);
++  return undefined;
++}
++
++function clamp(value: number | undefined, min: number, max: number, name: string, notes: string[]): number | undefined {
++  if (value === undefined) return undefined;
++  if (!Number.isFinite(value)) {
++    notes.push(`${name} was not a number, ignored`);
++    return undefined;
++  }
++  const clamped = Math.min(max, Math.max(min, value));
++  if (clamped !== value) notes.push(`${name} ${value} adjusted to ${clamped}`);
++  return clamped;
++}
++
++function labelText(text: string, notes: string[]): string {
++  const cleaned = text.trim().replace(/\s+/g, " ");
++  if (cleaned.length === 0) throw new Error("Label text must not be empty.");
++  if (cleaned.length > MAX_LABEL_LENGTH) {
++    notes.push(`label text shortened to ${MAX_LABEL_LENGTH} characters`);
++    return cleaned.slice(0, MAX_LABEL_LENGTH);
++  }
++  return cleaned;
++}
++
++function fontWeight(value: string | undefined, notes: string[]): string | undefined {
++  if (value === undefined) return undefined;
++  const v = value.trim().toLowerCase();
++  if (["normal", "bold", "lighter", "bolder"].includes(v) || /^[1-9]00$/.test(v)) return v;
++  notes.push(`fontWeight "${value}" is not valid, ignored`);
++  return undefined;
++}
++
++/* ------------------------------- helpers ------------------------------- */
++
++const coordKey = (p: Point): string => `${p.latitude.toFixed(4)},${p.longitude.toFixed(4)}`;
++const markerKey = (p: Point): string => `marker:${coordKey(p)}`;
++const labelKey = (p: Point): string => `label:${coordKey(p)}`;
++const pathKey = (a: Point, b: Point): string => `path:${coordKey(a)}->${coordKey(b)}`;
++const polygonKey = (g: PolygonGeometry): string => {
++  const first = g.points[0];
++  return `polygon:${first ? coordKey(first) : "none"}:${g.points.length}`;
++};
++
++function assertCapacity(ctx: RequestContext, adding: number): void {
++  const current = ctx.scene.getObjects().length;
++  if (current + adding > MAX_SCENE_OBJECTS) {
++    throw new Error(
++      `Scene limit reached (${MAX_SCENE_OBJECTS} objects). Nothing was added. Call renderScene now.`
++    );
++  }
++}
++
++function summary(ctx: RequestContext, parts: string[], notes: string[]): string {
++  const adjusted = notes.length > 0 ? ` Adjusted: ${notes.join("; ")}.` : "";
++  return `${parts.join(" ")}${adjusted} Scene now has ${ctx.scene.getObjects().length} object(s).`;
++}
++
++/* -------------------------------- labels ------------------------------- */
++
++export interface LabelStyleInput {
++  color?: string | undefined;
++  fontSize?: number | undefined;
++  fontWeight?: string | undefined;
++  opacity?: number | undefined;
++  backgroundColor?: string | undefined;
++}
++
++type LabelPlan =
++  | { action: "create"; key: string }
++  | { action: "replace"; key: string; existingId: string }
++  | { action: "keep"; key: string };
++
++function planLabel(ctx: RequestContext, point: Point, text: string, explicit: boolean): LabelPlan {
++  const key = labelKey(point);
++  const existingId = ctx.keys.get(key);
++  if (!existingId) return { action: "create", key };
++
++  const existing = ctx.scene.getObjectById(existingId);
++  const sameText = existing instanceof Label && existing.text === text;
++  // Auto labels never overwrite anything; explicit text overrides unless identical.
++  if (!explicit || sameText) return { action: "keep", key };
++  return { action: "replace", key, existingId };
++}
++
++function applyLabel(
++  ctx: RequestContext,
++  plan: LabelPlan,
++  point: Point,
++  location: string,
++  text: string,
++  style: LabelStyleInput | undefined,
++  notes: string[]
++): void {
++  if (plan.action === "keep") return;
++  if (plan.action === "replace") ctx.scene.removeObject(plan.existingId);
++
++  const labelStyle = new Style(
++    color(style?.color, "#000000", "label color", notes),
++    style?.opacity ?? 1,
++    1,
++    {
++      fontSize: clamp(style?.fontSize, 8, 32, "fontSize", notes),
++      fontWeight: fontWeight(style?.fontWeight, notes),
++      backgroundColor: optionalColor(style?.backgroundColor, "backgroundColor", notes),
++    }
++  );
++
++  const label = ctx.sceneBuilder.createLabel(
++    crypto.randomUUID(),
++    true,
++    labelStyle,
++    new Metadata(location, ""),
++    new Animation(false, 0),
++    point,
++    text
++  );
++  ctx.keys.set(plan.key, label.id);
++}
++
++export function addLabel(
++  ctx: RequestContext,
++  location: string,
++  point: Point,
++  text: string,
++  style?: LabelStyleInput
++): string {
++  const notes: string[] = [];
++  const cleaned = labelText(text, notes);
++  const plan = planLabel(ctx, point, cleaned, true);
++
++  assertCapacity(ctx, plan.action === "create" ? 1 : 0);
++  applyLabel(ctx, plan, point, location, cleaned, style, notes);
++
++  const what =
++    plan.action === "create" ? `Created label "${cleaned}".`
++    : plan.action === "replace" ? `Updated the label at "${location}" to "${cleaned}".`
++    : `A label "${cleaned}" already exists at "${location}"; nothing added.`;
++  return summary(ctx, [what], notes);
++}
++
++/* ------------------------------- markers ------------------------------- */
++
++export interface MarkerInput {
++  style?: { color?: string | undefined; size?: number | undefined; opacity?: number | undefined } | undefined;
++  label?: string | undefined;
++  showLabel?: boolean | undefined;
++}
++
++export function addMarker(ctx: RequestContext, location: string, point: Point, input: MarkerInput): string {
++  const notes: string[] = [];
++  const key = markerKey(point);
++  const markerExists = ctx.keys.has(key);
++
++  let plan: LabelPlan | null = null;
++  let text = "";
++  if (input.showLabel !== false) {
++    const explicit = input.label !== undefined;
++    text = labelText(explicit ? (input.label as string) : location, notes);
++    plan = planLabel(ctx, point, text, explicit);
++  }
++
++  const adding = (markerExists ? 0 : 1) + (plan?.action === "create" ? 1 : 0);
++  assertCapacity(ctx, adding);
++
++  const parts: string[] = [];
++  if (markerExists) {
++    parts.push(`Marker for "${location}" already exists; not duplicated.`);
++  } else {
++    const marker = ctx.sceneBuilder.createMarker(
++      crypto.randomUUID(),
++      true,
++      new Style(
++        color(input.style?.color, "#ff0000", "marker color", notes),
++        input.style?.opacity ?? 1,
++        2,
++        { size: clamp(input.style?.size, 0.4, 1.5, "size", notes) }
++      ),
++      new Metadata(location, ""),
++      new Animation(false, 0),
++      point
++    );
++    ctx.keys.set(key, marker.id);
++    parts.push(`Created marker "${location}".`);
++  }
++
++  if (plan) {
++    applyLabel(ctx, plan, point, location, text, undefined, notes);
++    if (plan.action === "create") parts.push(`Added label "${text}".`);
++    else if (plan.action === "replace") parts.push(`Updated label to "${text}".`);
++  }
++  return summary(ctx, parts, notes);
++}
++
++/* -------------------------------- paths -------------------------------- */
++
++export function hasPath(ctx: RequestContext, start: Point, end: Point): boolean {
++  return ctx.keys.has(pathKey(start, end));
++}
++
++export interface PathInput {
++  color?: string | undefined;
++  width?: number | undefined;
++  opacity?: number | undefined;
++  dash?: boolean | undefined;
++}
++
++export function addPath(
++  ctx: RequestContext,
++  startName: string,
++  endName: string,
++  start: Point,
++  end: Point,
++  line: LineString | null,
++  style?: PathInput
++): string {
++  const notes: string[] = [];
++  const key = pathKey(start, end);
++  if (ctx.keys.has(key)) {
++    return summary(ctx, [`Path ${startName} → ${endName} already exists; not duplicated.`], notes);
++  }
++  if (line === null) throw new Error("Internal error: route missing for a new path.");
++  assertCapacity(ctx, 1);
++
++  const path = ctx.sceneBuilder.createPath(
++    crypto.randomUUID(),
++    true,
++    new Style(
++      color(style?.color, "#0066ff", "path color", notes),
++      style?.opacity ?? 1,
++      clamp(style?.width, 1, 8, "width", notes) ?? 4,
++      { dash: style?.dash }
++    ),
++    new Metadata(`${startName} → ${endName}`, ""),
++    new Animation(false, 0),
++    line
++  );
++  ctx.keys.set(key, path.id);
++  return summary(ctx, [`Created path ${startName} → ${endName}.`], notes);
++}
++
++/* ------------------------------- polygons ------------------------------ */
++
++export interface PolygonInput {
++  fillColor?: string | undefined;
++  fillOpacity?: number | undefined;
++  borderColor?: string | undefined;
++  borderWidth?: number | undefined;
++  borderDash?: boolean | undefined;
++}
++
++export function addPolygon(
++  ctx: RequestContext,
++  location: string,
++  geometry: PolygonGeometry,
++  style?: PolygonInput
++): string {
++  const notes: string[] = [];
++  const key = polygonKey(geometry);
++  if (ctx.keys.has(key)) {
++    return summary(ctx, [`Polygon for "${location}" already exists; not duplicated.`], notes);
++  }
++  assertCapacity(ctx, 1);
++
++  const fillColor = color(style?.fillColor, "#00aa00", "fillColor", notes);
++  const fillOpacity = clamp(style?.fillOpacity, 0, 1, "fillOpacity", notes);
++  const borderWidth = clamp(style?.borderWidth, 0, 10, "borderWidth", notes);
++
++  const polygon = ctx.sceneBuilder.createPolygon(
++    crypto.randomUUID(),
++    true,
++    new Style(fillColor, fillOpacity ?? 0.4, borderWidth ?? 2, {
++      fillColor: style?.fillColor === undefined ? undefined : fillColor,
++      fillOpacity,
++      borderColor: optionalColor(style?.borderColor, "borderColor", notes),
++      borderWidth,
++      borderDash: style?.borderDash,
++    }),
++    new Metadata(location, ""),
++    new Animation(false, 0),
++    geometry
++  );
++  ctx.keys.set(key, polygon.id);
++  return summary(ctx, [`Created polygon "${location}".`], notes);
++}
+diff --git a/packages/server/src/services/BoundaryService.ts b/packages/server/src/services/BoundaryService.ts
+index ed2b56b..43f0384 100644
+--- a/packages/server/src/services/BoundaryService.ts
++++ b/packages/server/src/services/BoundaryService.ts
+@@ -1,7 +1,26 @@
+ import { Point, PolygonGeometry } from "@map-renderer/shared";
++import {
++  PromiseCache,
++  REQUEST_TIMEOUT_MS,
++  nominatimLimiter,
++  normalizeQuery,
++} from "./nominatim.js";
++
++interface GeoJsonGeometry {
++  type: string;
++  coordinates: unknown;
++}
+ 
+ export class BoundaryService {
+-  public async getBoundary(
++  private readonly cache = new PromiseCache<PolygonGeometry>(100);
++
++  public getBoundary(location: string): Promise<PolygonGeometry> {
++    return this.cache.get(normalizeQuery(location), () =>
++      nominatimLimiter.run(() => this.fetchBoundary(location))
++    );
++  }
++
++  private async fetchBoundary(
+     location: string
+   ): Promise<PolygonGeometry> {
+     const params = new URLSearchParams({
+@@ -17,6 +36,7 @@ export class BoundaryService {
+       headers: {
+         "User-Agent": "map-renderer-mcp/0.1.0",
+       },
++      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+     });
+ 
+     if (!response.ok) {
+@@ -51,18 +71,18 @@ export class BoundaryService {
+     return new PolygonGeometry(points);
+   }
+ 
+-  private extractPoints(geometry: any): Point[] {
++  private extractPoints(geometry: GeoJsonGeometry): Point[] {
+     const points: Point[] = [];
+ 
+     if (geometry.type === "Polygon") {
+-      const coordinates = geometry.coordinates[0];
+-      for (const [lon, lat] of coordinates) {
++      const coordinates = (geometry.coordinates as number[][][])[0] ?? [];
++      for (const [lon, lat] of coordinates as [number, number][]) {
+         points.push(new Point(lat, lon));
+       }
+     } else if (geometry.type === "MultiPolygon") {
+-      const firstPolygon = geometry.coordinates[0];
+-      const coordinates = firstPolygon[0];
+-      for (const [lon, lat] of coordinates) {
++      const firstPolygon = (geometry.coordinates as number[][][][])[0] ?? [];
++      const coordinates = firstPolygon[0] ?? [];
++      for (const [lon, lat] of coordinates as [number, number][]) {
+         points.push(new Point(lat, lon));
+       }
+     } else {
+diff --git a/packages/server/src/services/GeocodingService.ts b/packages/server/src/services/GeocodingService.ts
+index e95ea4e..50bd8cd 100644
+--- a/packages/server/src/services/GeocodingService.ts
++++ b/packages/server/src/services/GeocodingService.ts
+@@ -1,7 +1,21 @@
+ import { Point } from "@map-renderer/shared";
++import {
++  PromiseCache,
++  REQUEST_TIMEOUT_MS,
++  nominatimLimiter,
++  normalizeQuery,
++} from "./nominatim.js";
+ 
+ export class GeocodingService {
+-  public async getCoordinates(location: string): Promise<Point> {
++  private readonly cache = new PromiseCache<Point>();
++
++  public getCoordinates(location: string): Promise<Point> {
++    return this.cache.get(normalizeQuery(location), () =>
++      nominatimLimiter.run(() => this.fetchCoordinates(location))
++    );
++  }
++
++  private async fetchCoordinates(location: string): Promise<Point> {
+     const url =
+       `https://nominatim.openstreetmap.org/search?` +
+       new URLSearchParams({
+@@ -14,10 +28,11 @@ export class GeocodingService {
+       headers: {
+         "User-Agent": "map-renderer-mcp",
+       },
++      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+     });
+ 
+     if (!response.ok) {
+-      throw new Error("Failed to geocode location.");
++      throw new Error(`Failed to geocode location (status ${response.status}).`);
+     }
+ 
+     const results = await response.json();
+@@ -26,9 +41,6 @@ export class GeocodingService {
+       throw new Error(`Location "${location}" not found.`);
+     }
+ 
+-    return new Point(
+-      Number(results[0].lat),
+-      Number(results[0].lon)
+-    );
++    return new Point(Number(results[0].lat), Number(results[0].lon));
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/packages/server/src/services/RoutingService.ts b/packages/server/src/services/RoutingService.ts
+index d00c732..2c099f8 100644
+--- a/packages/server/src/services/RoutingService.ts
++++ b/packages/server/src/services/RoutingService.ts
+@@ -10,7 +10,7 @@ export class RoutingService {
+       `${start.longitude},${start.latitude};${end.longitude},${end.latitude}` +
+       `?overview=full&geometries=geojson`;
+ 
+-    const response = await fetch(url);
++    const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+ 
+     if (!response.ok) {
+       throw new Error("Failed to fetch route.");
+diff --git a/packages/server/src/services/nominatim.ts b/packages/server/src/services/nominatim.ts
+new file mode 100644
+index 0000000..be117a2
+--- /dev/null
++++ b/packages/server/src/services/nominatim.ts
+@@ -0,0 +1,64 @@
++/*
++ * Shared plumbing for calls to the public Nominatim service:
++ *  - RateLimiter: serialises calls and keeps a minimum gap between them
++ *    (Nominatim's usage policy allows about 1 request per second).
++ *  - PromiseCache: remembers successful lookups (and de-duplicates concurrent
++ *    identical ones). Failures are never cached.
++ */
++
++const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
++
++export class RateLimiter {
++  private tail: Promise<unknown> = Promise.resolve();
++  private nextAllowed = 0;
++
++  constructor(private readonly minIntervalMs: number) {}
++
++  public run<T>(task: () => Promise<T>): Promise<T> {
++    const result = this.tail.then(async () => {
++      const wait = this.nextAllowed - Date.now();
++      if (wait > 0) await sleep(wait);
++      this.nextAllowed = Date.now() + this.minIntervalMs;
++      return task();
++    });
++    this.tail = result.catch(() => undefined);
++    return result;
++  }
++}
++
++export class PromiseCache<T> {
++  private readonly entries = new Map<string, Promise<T>>();
++
++  constructor(private readonly maxEntries = 500) {}
++
++  public get(key: string, load: () => Promise<T>): Promise<T> {
++    const hit = this.entries.get(key);
++    if (hit) return hit;
++
++    const promise = load();
++    this.entries.set(key, promise);
++    promise.catch(() => {
++      // never keep a failed lookup
++      if (this.entries.get(key) === promise) this.entries.delete(key);
++    });
++
++    if (this.entries.size > this.maxEntries) {
++      const oldest = this.entries.keys().next().value;
++      if (oldest !== undefined) this.entries.delete(oldest);
++    }
++    return promise;
++  }
++}
++
++export function normalizeQuery(query: string): string {
++  return query.trim().toLowerCase().replace(/\s+/g, " ");
++}
++
++const minInterval = Number(process.env.NOMINATIM_MIN_INTERVAL_MS);
++
++/** One limiter for every Nominatim call in the process (geocoding + boundaries). */
++export const nominatimLimiter = new RateLimiter(
++  Number.isFinite(minInterval) && minInterval >= 0 ? minInterval : 1100
++);
++
++export const REQUEST_TIMEOUT_MS = 10_000;
+diff --git a/packages/server/src/tools/createLabel.ts b/packages/server/src/tools/createLabel.ts
+index eeeae78..59cc80a 100644
+--- a/packages/server/src/tools/createLabel.ts
++++ b/packages/server/src/tools/createLabel.ts
+@@ -3,12 +3,7 @@ import * as z from "zod/v4";
+ 
+ import { RequestContext } from "../RequestContext.js";
+ import { GeocodingService } from "../services/GeocodingService.js";
+-
+-import {
+-  Animation,
+-  Metadata,
+-  Style,
+-} from "@map-renderer/shared";
++import { addLabel } from "../sceneOps.js";
+ 
+ export function registerCreateLabelTool(
+   server: McpServer,
+@@ -18,11 +13,14 @@ export function registerCreateLabelTool(
+   server.registerTool(
+     "createLabel",
+     {
+-      description: "Create a text label on the map at a location.",
++      description:
++        "Put custom text at a location. Markers already get a name label automatically, so use this " +
++        "only for extra or different text, or to label a place that has no marker (e.g. a path endpoint). " +
++        "There is at most one label per spot: calling it again for the same spot replaces the text.",
+ 
+       inputSchema: z.object({
+-        location: z.string(),
+-        text: z.string(),
++        location: z.string().trim().min(1).max(200),
++        text: z.string().max(200),
+         style: z
+           .object({
+             color: z.string().optional(),
+@@ -38,35 +36,9 @@ export function registerCreateLabelTool(
+     async ({ location, text, style }) => {
+       const point = await geocodingService.getCoordinates(location);
+ 
+-      context.sceneBuilder.createLabel(
+-        crypto.randomUUID(),
+-        true,
+-        new Style(
+-          style?.color ?? "#000000",
+-          style?.opacity ?? 1,
+-          1,
+-          {
+-            fontSize: style?.fontSize,
+-            fontWeight: style?.fontWeight,
+-            backgroundColor: style?.backgroundColor,
+-          }
+-        ),
+-        new Metadata(location, ""),
+-        new Animation(false, 0),
+-        point,
+-        text
+-      );
+-
+-      console.error(context.scene);
++      const message = addLabel(context, location, point, text, style);
+ 
+-      return {
+-        content: [
+-          {
+-            type: "text",
+-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
+-          },
+-        ],
+-      };
++      return { content: [{ type: "text", text: message }] };
+     }
+   );
+-}
+\ No newline at end of file
++}
+diff --git a/packages/server/src/tools/createMarker.ts b/packages/server/src/tools/createMarker.ts
+index 2aae12c..33b9fcd 100644
+--- a/packages/server/src/tools/createMarker.ts
++++ b/packages/server/src/tools/createMarker.ts
+@@ -3,12 +3,7 @@ import * as z from "zod/v4";
+ 
+ import { RequestContext } from "../RequestContext.js";
+ import { GeocodingService } from "../services/GeocodingService.js";
+-
+-import {
+-  Animation,
+-  Metadata,
+-  Style,
+-} from "@map-renderer/shared";
++import { addMarker } from "../sceneOps.js";
+ 
+ export function registerCreateMarkerTool(
+   server: McpServer,
+@@ -18,10 +13,16 @@ export function registerCreateMarkerTool(
+   server.registerTool(
+     "createMarker",
+     {
+-      description: "Create a marker on the map.",
++      description:
++        "Place a marker on a named place. A text label with the place name is added automatically " +
++        "(pass `label` to use different text, or showLabel=false for no label). " +
++        "Safe to call twice: duplicates are ignored, so never repeat a call. " +
++        "Only pass `style` if the user asked for specific styling.",
+ 
+       inputSchema: z.object({
+-        location: z.string(),
++        location: z.string().trim().min(1).max(200),
++        label: z.string().max(200).optional(),
++        showLabel: z.boolean().optional(),
+         style: z
+           .object({
+             color: z.string().optional(),
+@@ -32,35 +33,13 @@ export function registerCreateMarkerTool(
+       }),
+     },
+ 
+-    async ({ location, style }) => {
++    async ({ location, label, showLabel, style }) => {
+       const point = await geocodingService.getCoordinates(location);
+ 
+-      context.sceneBuilder.createMarker(
+-        crypto.randomUUID(),
+-        true,
+-        new Style(
+-          style?.color ?? "#ff0000",
+-          style?.opacity ?? 1,
+-          2,
+-          {
+-            size: style?.size,
+-          }
+-        ),
+-        new Metadata(location, ""),
+-        new Animation(false, 0),
+-        point
+-      );
+-
+-      console.error(context.scene);
++      // No await between the duplicate check and the insert inside addMarker.
++      const text = addMarker(context, location, point, { label, showLabel, style });
+ 
+-      return {
+-        content: [
+-          {
+-            type: "text",
+-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
+-          },
+-        ],
+-      };
++      return { content: [{ type: "text", text }] };
+     }
+   );
+-}
+\ No newline at end of file
++}
+diff --git a/packages/server/src/tools/createPath.ts b/packages/server/src/tools/createPath.ts
+index fa04f32..fa7aa2c 100644
+--- a/packages/server/src/tools/createPath.ts
++++ b/packages/server/src/tools/createPath.ts
+@@ -4,12 +4,7 @@ import * as z from "zod/v4";
+ import { RequestContext } from "../RequestContext.js";
+ import { GeocodingService } from "../services/GeocodingService.js";
+ import { RoutingService } from "../services/RoutingService.js";
+-
+-import {
+-  Animation,
+-  Metadata,
+-  Style,
+-} from "@map-renderer/shared";
++import { addPath, hasPath } from "../sceneOps.js";
+ 
+ export function registerCreatePathTool(
+   server: McpServer,
+@@ -20,11 +15,13 @@ export function registerCreatePathTool(
+   server.registerTool(
+     "createPath",
+     {
+-      description: "Create a path on the map.",
++      description:
++        "Draw a driving route between two places. For more than two stops, call it once per consecutive pair. " +
++        "Safe to call twice: an identical path is ignored. Does not add markers or labels.",
+ 
+       inputSchema: z.object({
+-        start: z.string(),
+-        end: z.string(),
++        start: z.string().trim().min(1).max(200),
++        end: z.string().trim().min(1).max(200),
+         style: z
+           .object({
+             color: z.string().optional(),
+@@ -40,37 +37,15 @@ export function registerCreatePathTool(
+       const startPoint = await geocodingService.getCoordinates(start);
+       const endPoint = await geocodingService.getCoordinates(end);
+ 
+-      const line = await routingService.getRoute(
+-        startPoint,
+-        endPoint
+-      );
+-
+-      context.sceneBuilder.createPath(
+-        crypto.randomUUID(),
+-        true,
+-        new Style(
+-          style?.color ?? "#0066ff",
+-          style?.opacity ?? 1,
+-          style?.width ?? 4,
+-          {
+-            dash: style?.dash,
+-          }
+-        ),
+-        new Metadata(`${start} → ${end}`, ""),
+-        new Animation(false, 0),
+-        line
+-      );
++      // Skip the routing request entirely if this exact path is already in the scene.
++      const line = hasPath(context, startPoint, endPoint)
++        ? null
++        : await routingService.getRoute(startPoint, endPoint);
+ 
+-      console.error(context.scene);
++      // addPath re-checks synchronously, so two parallel identical calls cannot both insert.
++      const text = addPath(context, start, end, startPoint, endPoint, line, style);
+ 
+-      return {
+-        content: [
+-          {
+-            type: "text",
+-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
+-          },
+-        ],
+-      };
++      return { content: [{ type: "text", text }] };
+     }
+   );
+-}
+\ No newline at end of file
++}
+diff --git a/packages/server/src/tools/createPolygon.ts b/packages/server/src/tools/createPolygon.ts
+index 71c269e..c96c7c5 100644
+--- a/packages/server/src/tools/createPolygon.ts
++++ b/packages/server/src/tools/createPolygon.ts
+@@ -3,12 +3,7 @@ import * as z from "zod/v4";
+ 
+ import { RequestContext } from "../RequestContext.js";
+ import { BoundaryService } from "../services/BoundaryService.js";
+-
+-import {
+-  Animation,
+-  Metadata,
+-  Style,
+-} from "@map-renderer/shared";
++import { addPolygon } from "../sceneOps.js";
+ 
+ export function registerCreatePolygonTool(
+   server: McpServer,
+@@ -18,10 +13,12 @@ export function registerCreatePolygonTool(
+   server.registerTool(
+     "createPolygon",
+     {
+-      description: "Create a polygon on the map.",
++      description:
++        "Highlight the boundary of a named region (city, state, country, area). " +
++        "Safe to call twice: a duplicate is ignored. Does not add a label; use createLabel if one is wanted.",
+ 
+       inputSchema: z.object({
+-        location: z.string(),
++        location: z.string().trim().min(1).max(200),
+         style: z
+           .object({
+             fillColor: z.string().optional(),
+@@ -37,36 +34,9 @@ export function registerCreatePolygonTool(
+     async ({ location, style }) => {
+       const polygon = await boundaryService.getBoundary(location);
+ 
+-      context.sceneBuilder.createPolygon(
+-        crypto.randomUUID(),
+-        true,
+-        new Style(
+-          style?.fillColor ?? "#00aa00",
+-          style?.fillOpacity ?? 0.4,
+-          style?.borderWidth ?? 2,
+-          {
+-            fillColor: style?.fillColor,
+-            fillOpacity: style?.fillOpacity,
+-            borderColor: style?.borderColor,
+-            borderWidth: style?.borderWidth,
+-            borderDash: style?.borderDash,
+-          }
+-        ),
+-        new Metadata(location, ""),
+-        new Animation(false, 0),
+-        polygon
+-      );
+-
+-      console.error(context.scene);
++      const text = addPolygon(context, location, polygon, style);
+ 
+-      return {
+-        content: [
+-          {
+-            type: "text",
+-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
+-          },
+-        ],
+-      };
++      return { content: [{ type: "text", text }] };
+     }
+   );
+-}
+\ No newline at end of file
++}
+diff --git a/packages/server/src/tools/renderScene.ts b/packages/server/src/tools/renderScene.ts
+index 706b9a3..a7e16f5 100644
+--- a/packages/server/src/tools/renderScene.ts
++++ b/packages/server/src/tools/renderScene.ts
+@@ -11,7 +11,8 @@ export function registerRenderSceneTool(
+   server.registerTool(
+     "renderScene",
+     {
+-      description: "Render the current scene.",
++      description:
++        "Render the current scene. Call it exactly once, as the very last step, after all other tools.",
+     },
+ 
+     async () => {
+diff --git a/packages/server/test/e2e-scene-rules.mjs b/packages/server/test/e2e-scene-rules.mjs
+new file mode 100644
+index 0000000..d6e5553
+--- /dev/null
++++ b/packages/server/test/e2e-scene-rules.mjs
+@@ -0,0 +1,204 @@
++/* eslint-disable */
++// End-to-end tests for scene rules enforced IN CODE (not in the LLM prompt):
++// idempotent tools, one label per spot, auto labels, geocode cache + rate limit,
++// style clamping, object cap, no cached failures.
++// Runs the REAL built server as a child process; talks to it with the real MCP SDK client.
++// Usage (repo root, after building shared + server):  node packages/server/test/e2e-scene-rules.mjs
++import { spawn } from "node:child_process";
++import { fileURLToPath, pathToFileURL } from "node:url";
++import path from "node:path";
++import { Client } from "@modelcontextprotocol/sdk/client/index.js";
++import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
++
++const here = path.dirname(fileURLToPath(import.meta.url));
++const SERVER_JS = path.resolve(here, "../dist/index.js");
++const STUB = path.resolve(here, "stub-network.mjs");
++const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++const results = [];
++const record = (name, ok, note = "") => {
++  results.push({ name, ok, note });
++  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${note ? "  -- " + note : ""}`);
++};
++async function guard(name, fn) {
++  try { await fn(); } catch (e) { record(`${name} (EXCEPTION)`, false, String(e.message ?? e).slice(0, 200)); }
++}
++
++async function startServer(port, env = {}) {
++  const child = spawn(process.execPath, ["--import", pathToFileURL(STUB).href, SERVER_JS], {
++    env: { ...process.env, PORT: String(port), NOMINATIM_MIN_INTERVAL_MS: "0", ...env },
++    stdio: ["ignore", "ignore", "pipe"],
++  });
++  let log = "";
++  child.stderr.on("data", (d) => (log += d));
++  for (let i = 0; i < 50; i++) {
++    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return { child, getLog: () => log, port }; } catch {}
++    await sleep(100);
++  }
++  child.kill();
++  throw new Error("server did not start: " + log);
++}
++const stop = (s) => new Promise((r) => { s.child.once("exit", r); s.child.kill(); });
++
++async function connect(port) {
++  const client = new Client({ name: "rules", version: "1.0.0" });
++  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
++  return client;
++}
++const text = (r) => r.content.map((c) => c.text ?? "").join("");
++const call = (c, name, args = {}) => c.callTool({ name, arguments: args }, undefined, { timeout: 10000 });
++const scene = async (c) => JSON.parse(text(await call(c, "renderScene"))).objects;
++const ofType = (objs, t) => objs.filter((o) => o.type === t);
++const countLog = (S, needle) => S.getLog().split("\n").filter((l) => l.includes(needle)).length;
++
++async function main() {
++  const S = await startServer(3921);
++  const c = await connect(S.port);
++  try {
++    await guard("R1", async () => {
++      const cl = await connect(S.port);
++      const r = await call(cl, "createMarker", { location: "Delhi" });
++      const o = await scene(cl);
++      const labels = ofType(o, "label");
++      record("R1 marker auto-adds one name label", ofType(o, "marker").length === 1 && labels.length === 1 && labels[0].text === "Delhi", text(r));
++    });
++
++    await guard("R2", async () => {
++      const cl = await connect(S.port);
++      await call(cl, "createMarker", { location: "Jaipur" });
++      const again = text(await call(cl, "createMarker", { location: "Jaipur" }));
++      await call(cl, "createLabel", { location: "Jaipur", text: "Jaipur" });
++      const o = await scene(cl);
++      record("R2 repeated identical calls add nothing", ofType(o, "marker").length === 1 && ofType(o, "label").length === 1 && /already exists/.test(again), again);
++    });
++
++    await guard("R3", async () => {
++      const cl = await connect(S.port);
++      await call(cl, "createMarker", { location: "Agra" });
++      await call(cl, "createMarker", { location: "New Agra, India" }); // same spot, different words
++      const o = await scene(cl);
++      record("R3 same spot under a different name is not duplicated", ofType(o, "marker").length === 1 && ofType(o, "label").length === 1, `markers=${ofType(o, "marker").length} labels=${ofType(o, "label").length}`);
++    });
++
++    await guard("R4", async () => {
++      const cl = await connect(S.port);
++      await call(cl, "createMarker", { location: "Pune" });
++      await call(cl, "createLabel", { location: "Pune", text: "Oxford of the East" });
++      await call(cl, "createMarker", { location: "Pune" }); // auto label must NOT overwrite explicit text
++      const o = await scene(cl);
++      const labels = ofType(o, "label");
++      record("R4 explicit label replaces auto label, auto never overwrites", labels.length === 1 && labels[0].text === "Oxford of the East", JSON.stringify(labels.map((l) => l.text)));
++    });
++
++    await guard("R5", async () => {
++      const cl = await connect(S.port);
++      await call(cl, "createLabel", { location: "Surat", text: "Diamond City" });
++      await call(cl, "createMarker", { location: "Surat" });
++      const o = await scene(cl);
++      const labels = ofType(o, "label");
++      record("R5 label created first is kept when marker is added later", ofType(o, "marker").length === 1 && labels.length === 1 && labels[0].text === "Diamond City", JSON.stringify(labels.map((l) => l.text)));
++    });
++
++    await guard("R6", async () => {
++      const cl = await connect(S.port);
++      await call(cl, "createMarker", { location: "Nashik", showLabel: false });
++      const o = await scene(cl);
++      record("R6 showLabel=false gives marker without label", ofType(o, "marker").length === 1 && ofType(o, "label").length === 0);
++    });
++
++    await guard("R7", async () => {
++      const cl = await connect(S.port);
++      const before = countLog(S, "[stub] osrm");
++      await call(cl, "createPath", { start: "Nagpur", end: "Bhopal" });
++      const again = text(await call(cl, "createPath", { start: "Nagpur", end: "Bhopal" }));
++      const o = await scene(cl);
++      const osrmCalls = countLog(S, "[stub] osrm") - before;
++      record("R7 duplicate path ignored and routing service called once", ofType(o, "path").length === 1 && osrmCalls === 1 && /already exists/.test(again), `paths=${ofType(o, "path").length} osrm=${osrmCalls}`);
++    });
++
++    await guard("R8", async () => {
++      const cl = await connect(S.port);
++      await call(cl, "createPolygon", { location: "Goa" });
++      await call(cl, "createPolygon", { location: "goa " });
++      const o = await scene(cl);
++      record("R8 duplicate polygon ignored", ofType(o, "polygon").length === 1, `polygons=${ofType(o, "polygon").length}`);
++    });
++
++    await guard("R9", async () => {
++      const a = await connect(S.port), b = await connect(S.port);
++      await call(a, "createMarker", { location: "CacheTown" });
++      await call(a, "createLabel", { location: "CacheTown", text: "x" });
++      await call(a, "createMarker", { location: "cachetown" });
++      await call(b, "createMarker", { location: "CacheTown" }); // different session, shared cache
++      const n = countLog(S, "kind=geocode q=CacheTown");
++      record("R9 geocode cached across calls and sessions (1 network call)", n === 1, `network calls=${n}`);
++    });
++
++    await guard("R10", async () => {
++      const cl = await connect(S.port);
++      const r1 = text(await call(cl, "createMarker", { location: "Kochi", style: { size: 50, color: "reddish" } }));
++      const r2 = text(await call(cl, "createPath", { start: "Kochi", end: "Madurai", style: { width: 100, color: "javascript:alert(1)" } }));
++      const r3 = text(await call(cl, "createLabel", { location: "Kochi", text: "k".repeat(200), style: { fontSize: 500, fontWeight: "ultra" } }));
++      const o = await scene(cl);
++      const m = ofType(o, "marker")[0], p = ofType(o, "path")[0], l = ofType(o, "label")[0];
++      const ok = m.style.options.size === 1.5 && m.style.color === "#ff0000" && p.style.width === 8 && p.style.color === "#0066ff"
++        && l.text.length === 80 && l.style.options.fontSize === 32 && l.style.options.fontWeight === undefined && /Adjusted/.test(r1);
++      record("R10 bad style values clamped/sanitised, model is told", ok, `size=${m.style.options.size} color=${m.style.color} width=${p.style.width} labelLen=${l.text.length} fs=${l.style.options.fontSize}`);
++    });
++
++    await guard("R11", async () => {
++      const cl = await connect(S.port);
++      const r = await call(cl, "createLabel", { location: "Kochi", text: "   " });
++      const o = await scene(cl);
++      record("R11 blank label text rejected", r.isError === true && ofType(o, "label").length === 0, text(r).slice(0, 80));
++    });
++
++    await guard("R12", async () => {
++      const cl = await connect(S.port);
++      const a = await call(cl, "createMarker", { location: "Nowhere City" });
++      const b = await call(cl, "createMarker", { location: "Nowhere City" });
++      const n = countLog(S, "q=Nowhere City");
++      record("R12 failed lookups are not cached (retry hits network again)", a.isError === true && b.isError === true && n === 2, `isError=${a.isError},${b.isError} network calls=${n}`);
++    });
++
++    await guard("R13", async () => {
++      // parallel identical calls inside ONE session must still yield one object
++      const cl = await connect(S.port);
++      await Promise.all([...Array(5)].map(() => call(cl, "createMarker", { location: "Ranchi" })));
++      const o = await scene(cl);
++      record("R13 5 parallel identical calls -> 1 marker, 1 label", ofType(o, "marker").length === 1 && ofType(o, "label").length === 1, `markers=${ofType(o, "marker").length} labels=${ofType(o, "label").length}`);
++    });
++  } finally {
++    await c.close().catch(() => {});
++    await stop(S);
++  }
++
++  // R14 object cap, atomic (separate server with tiny cap)
++  const Cap = await startServer(3922, { MAX_SCENE_OBJECTS: "5" });
++  try {
++    await guard("R14", async () => {
++      const cl = await connect(Cap.port);
++      await call(cl, "createMarker", { location: "Alpha" }); // marker+label = 2
++      await call(cl, "createMarker", { location: "Beta" });  // 4
++      const r = await call(cl, "createMarker", { location: "Gamma" }); // needs 2 more -> 6 > 5
++      const o = await scene(cl);
++      record("R14 scene cap enforced atomically (no half-added marker)", r.isError === true && o.length === 4 && /limit/i.test(text(r)), `isError=${r.isError} objects=${o.length}`);
++    });
++  } finally { await stop(Cap); }
++
++  // R15 Nominatim rate limit (separate server, 300 ms gap)
++  const Rate = await startServer(3923, { NOMINATIM_MIN_INTERVAL_MS: "300" });
++  try {
++    await guard("R15", async () => {
++      const cl = await connect(Rate.port);
++      await Promise.all(["Rate1", "Rate2", "Rate3", "Rate4"].map((q) => call(cl, "createMarker", { location: q, showLabel: false })));
++      const ts = Rate.getLog().split("\n").filter((l) => l.includes("[stub] nominatim")).map((l) => Number(/t=(\d+)/.exec(l)[1])).sort((a, b) => a - b);
++      const gaps = ts.slice(1).map((t, i) => t - ts[i]);
++      record("R15 Nominatim calls spaced >= configured gap", ts.length === 4 && gaps.every((g) => g >= 270), `gaps(ms)=${gaps.join(",")}`);
++    });
++  } finally { await stop(Rate); }
++
++  const failed = results.filter((r) => !r.ok);
++  console.log(`\n${results.length - failed.length}/${results.length} passed`);
++  process.exit(failed.length ? 1 : 0);
++}
++main().catch((e) => { console.error("HARNESS ERROR", e); process.exit(2); });
+diff --git a/packages/server/test/e2e-sessions.mjs b/packages/server/test/e2e-sessions.mjs
+index 05a4a08..597860e 100644
+--- a/packages/server/test/e2e-sessions.mjs
++++ b/packages/server/test/e2e-sessions.mjs
+@@ -20,7 +20,7 @@ const record = (name, ok, note = "") => {
+ 
+ async function startServer(port, env = {}) {
+   const child = spawn(process.execPath, ["--import", pathToFileURL(STUB).href, SERVER_JS], {
+-    env: { ...process.env, PORT: String(port), ...env },
++    env: { ...process.env, PORT: String(port), NOMINATIM_MIN_INTERVAL_MS: "0", ...env },
+     stdio: ["ignore", "ignore", "pipe"],
+   });
+   let log = "";
+@@ -45,7 +45,8 @@ const call = (c, name, args = {}) => c.client.callTool({ name, arguments: args }
+ async function guard(fn) { try { await fn(); } catch (e) { record("EXCEPTION in test block", false, String(e.message ?? e).slice(0, 160)); } }
+ async function names(c) {
+   const r = await call(c, "renderScene");
+-  return JSON.parse(text(r)).objects.map((o) => o.metadata.name);
++  // Auto-created labels are covered by e2e-scene-rules.mjs; here we only compare real features.
++  return JSON.parse(text(r)).objects.filter((o) => o.type !== "label").map((o) => o.metadata.name);
+ }
+ const health = async (port) => (await fetch(`http://127.0.0.1:${port}/health`)).json();
+ const rawPost = (port, body, sid) =>
+@@ -78,7 +79,7 @@ async function main() {
+       await call(A, "createLabel", { location: "A-Delhi", text: "A label" });
+       await call(B, "createPolygon", { location: "B-Kerala" });
+       const [na, nb] = [await names(A), await names(B)];
+-      record("T2 isolation A", sameSet(na, ["A-Delhi", "A-Delhi"]), JSON.stringify(na));
++      record("T2 isolation A", sameSet(na, ["A-Delhi"]), JSON.stringify(na));
+       record("T2 isolation B", sameSet(nb, ["B-Mumbai", "B-Kerala"]), JSON.stringify(nb));
+       await A.client.close(); await B.client.close();
+     });
+diff --git a/packages/server/test/stub-network.mjs b/packages/server/test/stub-network.mjs
+index f532a04..5e8979c 100644
+--- a/packages/server/test/stub-network.mjs
++++ b/packages/server/test/stub-network.mjs
+@@ -1,6 +1,9 @@
+ /* eslint-disable */
+ // Test-only: preloaded via `node --import`. Replaces global fetch for Nominatim/OSRM
+ // so tests are deterministic, offline and fast. Production code is NOT modified.
++// Every outgoing call is logged to stderr so tests can count and time them:
++//   [stub] nominatim t=<ms> kind=<geocode|boundary> q=<query>
++//   [stub] osrm t=<ms>
+ const realFetch = globalThis.fetch;
+ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+ function hash(s) {
+@@ -8,24 +11,35 @@ function hash(s) {
+   for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+   return h;
+ }
++// "Delhi", "New Delhi", "new delhi, India" all resolve to the same spot (like real geocoding).
++function canonical(q) {
++  return q.toLowerCase().replace(/,\s*india\s*$/, "").replace(/^new\s+/, "").trim();
++}
+ function coords(q) {
+-  const h = hash(q);
++  const h = hash(canonical(q));
+   return { lat: 8 + (h % 2900) / 100, lon: 68 + ((h >> 8) % 2900) / 100 };
+ }
+ globalThis.fetch = async (input, init) => {
+   const url = String(typeof input === "string" ? input : input.url ?? input);
+-  await sleep(20 + Math.floor(Math.random() * 40)); // jitter so requests really interleave
+   if (url.includes("nominatim.openstreetmap.org")) {
+     const u = new URL(url);
+     const q = u.searchParams.get("q") ?? "";
++    const kind = u.searchParams.get("format") === "geojson" ? "boundary" : "geocode";
++    console.error(`[stub] nominatim t=${Date.now()} kind=${kind} q=${q}`);
++    await sleep(20 + Math.floor(Math.random() * 40)); // jitter so requests really interleave
++    if (q.toLowerCase().includes("nowhere")) {
++      return Response.json(kind === "boundary" ? { features: [] } : []);
++    }
+     const { lat, lon } = coords(q);
+-    if (u.searchParams.get("format") === "geojson") {
++    if (kind === "boundary") {
+       const d = 0.5;
+       return Response.json({ features: [{ geometry: { type: "Polygon", coordinates: [[[lon, lat], [lon + d, lat], [lon + d, lat + d], [lon, lat + d], [lon, lat]]] } }] });
+     }
+     return Response.json([{ lat: String(lat), lon: String(lon) }]);
+   }
+   if (url.includes("router.project-osrm.org")) {
++    console.error(`[stub] osrm t=${Date.now()}`);
++    await sleep(20 + Math.floor(Math.random() * 40));
+     return Response.json({ routes: [{ geometry: { coordinates: [[68, 8], [69, 9], [70, 10]] } }] });
+   }
+   return realFetch(input, init);

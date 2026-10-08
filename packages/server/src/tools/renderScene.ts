@@ -11,7 +11,8 @@ export function registerRenderSceneTool(
   server.registerTool(
     "renderScene",
     {
-      description: "Render the current scene.",
+      description:
+        "Render the current scene. Call it exactly once, as the very last step, after all other tools.",
     },
 
     async () => {

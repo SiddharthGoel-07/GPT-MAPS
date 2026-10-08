@@ -20,7 +20,7 @@ const record = (name, ok, note = "") => {
 
 async function startServer(port, env = {}) {
   const child = spawn(process.execPath, ["--import", pathToFileURL(STUB).href, SERVER_JS], {
-    env: { ...process.env, PORT: String(port), ...env },
+    env: { ...process.env, PORT: String(port), NOMINATIM_MIN_INTERVAL_MS: "0", ...env },
     stdio: ["ignore", "ignore", "pipe"],
   });
   let log = "";
@@ -45,7 +45,8 @@ const call = (c, name, args = {}) => c.client.callTool({ name, arguments: args }
 async function guard(fn) { try { await fn(); } catch (e) { record("EXCEPTION in test block", false, String(e.message ?? e).slice(0, 160)); } }
 async function names(c) {
   const r = await call(c, "renderScene");
-  return JSON.parse(text(r)).objects.map((o) => o.metadata.name);
+  // Auto-created labels are covered by e2e-scene-rules.mjs; here we only compare real features.
+  return JSON.parse(text(r)).objects.filter((o) => o.type !== "label").map((o) => o.metadata.name);
 }
 const health = async (port) => (await fetch(`http://127.0.0.1:${port}/health`)).json();
 const rawPost = (port, body, sid) =>
@@ -78,7 +79,7 @@ async function main() {
       await call(A, "createLabel", { location: "A-Delhi", text: "A label" });
       await call(B, "createPolygon", { location: "B-Kerala" });
       const [na, nb] = [await names(A), await names(B)];
-      record("T2 isolation A", sameSet(na, ["A-Delhi", "A-Delhi"]), JSON.stringify(na));
+      record("T2 isolation A", sameSet(na, ["A-Delhi"]), JSON.stringify(na));
       record("T2 isolation B", sameSet(nb, ["B-Mumbai", "B-Kerala"]), JSON.stringify(nb));
       await A.client.close(); await B.client.close();
     });

@@ -3,12 +3,7 @@ import * as z from "zod/v4";
 
 import { RequestContext } from "../RequestContext.js";
 import { BoundaryService } from "../services/BoundaryService.js";
-
-import {
-  Animation,
-  Metadata,
-  Style,
-} from "@map-renderer/shared";
+import { addPolygon } from "../sceneOps.js";
 
 export function registerCreatePolygonTool(
   server: McpServer,
@@ -18,10 +13,12 @@ export function registerCreatePolygonTool(
   server.registerTool(
     "createPolygon",
     {
-      description: "Create a polygon on the map.",
+      description:
+        "Highlight the boundary of a named region (city, state, country, area). " +
+        "Safe to call twice: a duplicate is ignored. Does not add a label; use createLabel if one is wanted.",
 
       inputSchema: z.object({
-        location: z.string(),
+        location: z.string().trim().min(1).max(200),
         style: z
           .object({
             fillColor: z.string().optional(),
@@ -37,36 +34,9 @@ export function registerCreatePolygonTool(
     async ({ location, style }) => {
       const polygon = await boundaryService.getBoundary(location);
 
-      context.sceneBuilder.createPolygon(
-        crypto.randomUUID(),
-        true,
-        new Style(
-          style?.fillColor ?? "#00aa00",
-          style?.fillOpacity ?? 0.4,
-          style?.borderWidth ?? 2,
-          {
-            fillColor: style?.fillColor,
-            fillOpacity: style?.fillOpacity,
-            borderColor: style?.borderColor,
-            borderWidth: style?.borderWidth,
-            borderDash: style?.borderDash,
-          }
-        ),
-        new Metadata(location, ""),
-        new Animation(false, 0),
-        polygon
-      );
+      const text = addPolygon(context, location, polygon, style);
 
-      console.error(context.scene);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text }] };
     }
   );
 }

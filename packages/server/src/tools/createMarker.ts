@@ -3,12 +3,7 @@ import * as z from "zod/v4";
 
 import { RequestContext } from "../RequestContext.js";
 import { GeocodingService } from "../services/GeocodingService.js";
-
-import {
-  Animation,
-  Metadata,
-  Style,
-} from "@map-renderer/shared";
+import { addMarker } from "../sceneOps.js";
 
 export function registerCreateMarkerTool(
   server: McpServer,
@@ -18,10 +13,16 @@ export function registerCreateMarkerTool(
   server.registerTool(
     "createMarker",
     {
-      description: "Create a marker on the map.",
+      description:
+        "Place a marker on a named place. A text label with the place name is added automatically " +
+        "(pass `label` to use different text, or showLabel=false for no label). " +
+        "Safe to call twice: duplicates are ignored, so never repeat a call. " +
+        "Only pass `style` if the user asked for specific styling.",
 
       inputSchema: z.object({
-        location: z.string(),
+        location: z.string().trim().min(1).max(200),
+        label: z.string().max(200).optional(),
+        showLabel: z.boolean().optional(),
         style: z
           .object({
             color: z.string().optional(),
@@ -32,35 +33,13 @@ export function registerCreateMarkerTool(
       }),
     },
 
-    async ({ location, style }) => {
+    async ({ location, label, showLabel, style }) => {
       const point = await geocodingService.getCoordinates(location);
 
-      context.sceneBuilder.createMarker(
-        crypto.randomUUID(),
-        true,
-        new Style(
-          style?.color ?? "#ff0000",
-          style?.opacity ?? 1,
-          2,
-          {
-            size: style?.size,
-          }
-        ),
-        new Metadata(location, ""),
-        new Animation(false, 0),
-        point
-      );
+      // No await between the duplicate check and the insert inside addMarker.
+      const text = addMarker(context, location, point, { label, showLabel, style });
 
-      console.error(context.scene);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text }] };
     }
   );
 }

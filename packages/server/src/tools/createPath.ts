@@ -4,12 +4,7 @@ import * as z from "zod/v4";
 import { RequestContext } from "../RequestContext.js";
 import { GeocodingService } from "../services/GeocodingService.js";
 import { RoutingService } from "../services/RoutingService.js";
-
-import {
-  Animation,
-  Metadata,
-  Style,
-} from "@map-renderer/shared";
+import { addPath, hasPath } from "../sceneOps.js";
 
 export function registerCreatePathTool(
   server: McpServer,
@@ -20,11 +15,13 @@ export function registerCreatePathTool(
   server.registerTool(
     "createPath",
     {
-      description: "Create a path on the map.",
+      description:
+        "Draw a driving route between two places. For more than two stops, call it once per consecutive pair. " +
+        "Safe to call twice: an identical path is ignored. Does not add markers or labels.",
 
       inputSchema: z.object({
-        start: z.string(),
-        end: z.string(),
+        start: z.string().trim().min(1).max(200),
+        end: z.string().trim().min(1).max(200),
         style: z
           .object({
             color: z.string().optional(),
@@ -40,37 +37,15 @@ export function registerCreatePathTool(
       const startPoint = await geocodingService.getCoordinates(start);
       const endPoint = await geocodingService.getCoordinates(end);
 
-      const line = await routingService.getRoute(
-        startPoint,
-        endPoint
-      );
+      // Skip the routing request entirely if this exact path is already in the scene.
+      const line = hasPath(context, startPoint, endPoint)
+        ? null
+        : await routingService.getRoute(startPoint, endPoint);
 
-      context.sceneBuilder.createPath(
-        crypto.randomUUID(),
-        true,
-        new Style(
-          style?.color ?? "#0066ff",
-          style?.opacity ?? 1,
-          style?.width ?? 4,
-          {
-            dash: style?.dash,
-          }
-        ),
-        new Metadata(`${start} → ${end}`, ""),
-        new Animation(false, 0),
-        line
-      );
+      // addPath re-checks synchronously, so two parallel identical calls cannot both insert.
+      const text = addPath(context, start, end, startPoint, endPoint, line, style);
 
-      console.error(context.scene);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text }] };
     }
   );
 }

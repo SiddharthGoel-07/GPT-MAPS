@@ -15,6 +15,14 @@ export class RequestContext {
   public scene: Scene;
   public sceneBuilder: SceneBuilder;
 
+  /**
+   * De-duplication index for this scene: semantic key -> object id.
+   * Keys are built from coordinates (see sceneOps.ts), so "Delhi" and
+   * "New Delhi, India" resolve to the same marker. Must always be kept in
+   * sync with `scene`; reset() clears it.
+   */
+  public readonly keys = new Map<string, string>();
+
   constructor() {
     this.scene = new Scene();
     this.sceneBuilder = new SceneBuilder(this.scene);
@@ -28,6 +36,7 @@ export class RequestContext {
    * these via the context object reference at call time.
    */
   public reset(): void {
+    this.keys.clear();
     this.scene = new Scene();
     this.sceneBuilder = new SceneBuilder(this.scene);
   }

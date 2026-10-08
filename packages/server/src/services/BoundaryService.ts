@@ -1,7 +1,26 @@
 import { Point, PolygonGeometry } from "@map-renderer/shared";
+import {
+  PromiseCache,
+  REQUEST_TIMEOUT_MS,
+  nominatimLimiter,
+  normalizeQuery,
+} from "./nominatim.js";
+
+interface GeoJsonGeometry {
+  type: string;
+  coordinates: unknown;
+}
 
 export class BoundaryService {
-  public async getBoundary(
+  private readonly cache = new PromiseCache<PolygonGeometry>(100);
+
+  public getBoundary(location: string): Promise<PolygonGeometry> {
+    return this.cache.get(normalizeQuery(location), () =>
+      nominatimLimiter.run(() => this.fetchBoundary(location))
+    );
+  }
+
+  private async fetchBoundary(
     location: string
   ): Promise<PolygonGeometry> {
     const params = new URLSearchParams({
@@ -17,6 +36,7 @@ export class BoundaryService {
       headers: {
         "User-Agent": "map-renderer-mcp/0.1.0",
       },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -51,18 +71,18 @@ export class BoundaryService {
     return new PolygonGeometry(points);
   }
 
-  private extractPoints(geometry: any): Point[] {
+  private extractPoints(geometry: GeoJsonGeometry): Point[] {
     const points: Point[] = [];
 
     if (geometry.type === "Polygon") {
-      const coordinates = geometry.coordinates[0];
-      for (const [lon, lat] of coordinates) {
+      const coordinates = (geometry.coordinates as number[][][])[0] ?? [];
+      for (const [lon, lat] of coordinates as [number, number][]) {
         points.push(new Point(lat, lon));
       }
     } else if (geometry.type === "MultiPolygon") {
-      const firstPolygon = geometry.coordinates[0];
-      const coordinates = firstPolygon[0];
-      for (const [lon, lat] of coordinates) {
+      const firstPolygon = (geometry.coordinates as number[][][][])[0] ?? [];
+      const coordinates = firstPolygon[0] ?? [];
+      for (const [lon, lat] of coordinates as [number, number][]) {
         points.push(new Point(lat, lon));
       }
     } else {

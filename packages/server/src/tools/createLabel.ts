@@ -3,12 +3,7 @@ import * as z from "zod/v4";
 
 import { RequestContext } from "../RequestContext.js";
 import { GeocodingService } from "../services/GeocodingService.js";
-
-import {
-  Animation,
-  Metadata,
-  Style,
-} from "@map-renderer/shared";
+import { addLabel } from "../sceneOps.js";
 
 export function registerCreateLabelTool(
   server: McpServer,
@@ -18,11 +13,14 @@ export function registerCreateLabelTool(
   server.registerTool(
     "createLabel",
     {
-      description: "Create a text label on the map at a location.",
+      description:
+        "Put custom text at a location. Markers already get a name label automatically, so use this " +
+        "only for extra or different text, or to label a place that has no marker (e.g. a path endpoint). " +
+        "There is at most one label per spot: calling it again for the same spot replaces the text.",
 
       inputSchema: z.object({
-        location: z.string(),
-        text: z.string(),
+        location: z.string().trim().min(1).max(200),
+        text: z.string().max(200),
         style: z
           .object({
             color: z.string().optional(),
@@ -38,35 +36,9 @@ export function registerCreateLabelTool(
     async ({ location, text, style }) => {
       const point = await geocodingService.getCoordinates(location);
 
-      context.sceneBuilder.createLabel(
-        crypto.randomUUID(),
-        true,
-        new Style(
-          style?.color ?? "#000000",
-          style?.opacity ?? 1,
-          1,
-          {
-            fontSize: style?.fontSize,
-            fontWeight: style?.fontWeight,
-            backgroundColor: style?.backgroundColor,
-          }
-        ),
-        new Metadata(location, ""),
-        new Animation(false, 0),
-        point,
-        text
-      );
+      const message = addLabel(context, location, point, text, style);
 
-      console.error(context.scene);
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Scene now contains ${context.scene.getObjects().length} object(s).`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: message }] };
     }
   );
 }
