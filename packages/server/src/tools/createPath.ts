@@ -17,6 +17,7 @@ export function registerCreatePathTool(
     {
       description:
         "Draw a driving route between two places. For more than two stops, call it once per consecutive pair. " +
+        "If no road connects the two places (for example across water), a straight line is drawn instead and you are told. " +
         "Safe to call twice: an identical path is ignored. Does not add markers or labels.",
 
       inputSchema: z.object({
@@ -38,12 +39,12 @@ export function registerCreatePathTool(
       const endPoint = await geocodingService.getCoordinates(end);
 
       // Skip the routing request entirely if this exact path is already in the scene.
-      const line = hasPath(context, startPoint, endPoint)
+      const route = hasPath(context, startPoint, endPoint)
         ? null
         : await routingService.getRoute(startPoint, endPoint);
 
       // addPath re-checks synchronously, so two parallel identical calls cannot both insert.
-      const text = addPath(context, start, end, startPoint, endPoint, line, style);
+      const text = addPath(context, start, end, startPoint, endPoint, route, style);
 
       return { content: [{ type: "text", text }] };
     }

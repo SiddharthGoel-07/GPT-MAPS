@@ -21,7 +21,7 @@
     "watch": "tsc -p tsconfig.json --watch",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "node --test test/serializer.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs"
+    "test": "node --test test/serializer.test.mjs test/geometry.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-geometry-routes.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs"
   },
   "dependencies": {
     "@map-renderer/shared": "0.1.0",

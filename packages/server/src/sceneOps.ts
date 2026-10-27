@@ -1,4 +1,5 @@
 import { MAX_SCENE_WIRE_OBJECTS, isValidColor } from "@map-renderer/shared";
+import type { RouteResult } from "./services/RoutingService.js";
 import type { LabelObject, LngLat, MarkerObject, PathObject, PolygonObject } from "@map-renderer/shared";
 import type { RequestContext } from "./RequestContext.js";
 
@@ -240,7 +241,7 @@ export function addPath(
   endName: string,
   start: LngLat,
   end: LngLat,
-  line: LngLat[] | null,
+  route: RouteResult | null,
   style?: PathInput
 ): string {
   const notes: string[] = [];
@@ -248,19 +249,26 @@ export function addPath(
   if (ctx.keys.has(key)) {
     return summary(ctx, [`Path ${startName} → ${endName} already exists; not duplicated.`], notes);
   }
-  if (line === null) throw new Error("Internal error: route missing for a new path.");
+  if (route === null) throw new Error("Internal error: route missing for a new path.");
   assertCapacity(ctx, 1);
 
   const path: PathObject = {
     type: "path",
     id: crypto.randomUUID(),
     name: name(`${startName} → ${endName}`),
-    coordinates: line,
+    coordinates: route.coordinates,
     color: color(style?.color, "#0066ff", "path color", notes),
     opacity: clamp(style?.opacity, 0, 1, "opacity", notes) ?? 1,
     width: clamp(style?.width, 1, 8, "width", notes) ?? 4,
-    dash: style?.dash ?? false,
+    // A straight line is not a road: dashed by default so it does not look like one.
+    dash: style?.dash ?? route.straight,
   };
+  if (route.straight) {
+    notes.push(
+      `No road route exists between ${startName} and ${endName} (for example across water), ` +
+        "so a straight line was drawn instead of a driving route."
+    );
+  }
   ctx.add(path);
   ctx.keys.set(key, path.id);
   return summary(ctx, [`Created path ${startName} → ${endName}.`], notes);

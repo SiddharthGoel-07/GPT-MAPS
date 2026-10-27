@@ -1,0 +1,830 @@
+diff --git a/packages/server/package.json b/packages/server/package.json
+index 31fcd44..53f3bef 100644
+--- a/packages/server/package.json
++++ b/packages/server/package.json
+@@ -21,7 +21,7 @@
+     "watch": "tsc -p tsconfig.json --watch",
+     "dev": "tsx watch src/index.ts",
+     "start": "node dist/index.js",
+-    "test": "node --test test/serializer.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs"
++    "test": "node --test test/serializer.test.mjs test/geometry.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-geometry-routes.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs"
+   },
+   "dependencies": {
+     "@map-renderer/shared": "0.1.0",
+diff --git a/packages/server/src/geometry.ts b/packages/server/src/geometry.ts
+new file mode 100644
+index 0000000..55dd310
+--- /dev/null
++++ b/packages/server/src/geometry.ts
+@@ -0,0 +1,184 @@
++import type { LngLat } from "@map-renderer/shared";
++
++/*
++ * Pure helpers for turning a GeoJSON Polygon/MultiPolygon into the scene's
++ * `polygons` layout (polygons[i] = [outerRing, ...holes], every ring closed),
++ * and for keeping the point count bounded.
++ */
++
++export interface GeoJsonGeometry {
++  type: string;
++  coordinates: unknown;
++}
++
++export function countPoints(polygons: readonly (readonly (readonly LngLat[])[])[]): number {
++  let n = 0;
++  for (const rings of polygons) for (const ring of rings) n += ring.length;
++  return n;
++}
++
++function asPoint(value: unknown): LngLat | null {
++  if (!Array.isArray(value) || value.length < 2) return null;
++  const lng = value[0];
++  const lat = value[1];
++  if (typeof lng !== "number" || typeof lat !== "number") return null;
++  if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
++  if (lng < -180 || lng > 180 || lat < -90 || lat > 90) return null;
++  return [lng, lat];
++}
++
++/** Valid points only, no consecutive duplicates, closed. null if fewer than 3 distinct corners remain. */
++function cleanRing(raw: unknown): LngLat[] | null {
++  if (!Array.isArray(raw)) return null;
++
++  const open: LngLat[] = [];
++  for (const item of raw) {
++    const p = asPoint(item);
++    if (!p) continue;
++    const prev = open[open.length - 1];
++    if (prev && prev[0] === p[0] && prev[1] === p[1]) continue;
++    open.push(p);
++  }
++
++  const first = open[0];
++  const last = open[open.length - 1];
++  if (first && last && open.length > 1 && first[0] === last[0] && first[1] === last[1]) open.pop();
++
++  const start = open[0];
++  if (open.length < 3 || !start) return null;
++  open.push([start[0], start[1]]);
++  return open;
++}
++
++/**
++ * Keeps EVERY polygon (islands) and every hole. Rings that are unusable are
++ * dropped: a bad hole is just removed; a bad outer ring removes its polygon.
++ */
++export function parseGeoJsonPolygons(geometry: GeoJsonGeometry): LngLat[][][] {
++  let rawPolygons: unknown[];
++
++  if (geometry.type === "Polygon") {
++    rawPolygons = [geometry.coordinates];
++  } else if (geometry.type === "MultiPolygon" && Array.isArray(geometry.coordinates)) {
++    rawPolygons = geometry.coordinates;
++  } else {
++    throw new Error(
++      `Unsupported geometry type: ${geometry.type}. Expected Polygon or MultiPolygon.`
++    );
++  }
++
++  const result: LngLat[][][] = [];
++  for (const rawRings of rawPolygons) {
++    if (!Array.isArray(rawRings)) continue;
++    const outer = cleanRing(rawRings[0]);
++    if (!outer) continue;
++    const rings: LngLat[][] = [outer];
++    for (const rawHole of rawRings.slice(1)) {
++      const hole = cleanRing(rawHole);
++      if (hole) rings.push(hole);
++    }
++    result.push(rings);
++  }
++  return result;
++}
++
++/* ------------------------------ simplification ------------------------------ */
++
++function distanceToSegment(p: LngLat, a: LngLat, b: LngLat): number {
++  const dx = b[0] - a[0];
++  const dy = b[1] - a[1];
++  const lengthSq = dx * dx + dy * dy;
++  if (lengthSq === 0) return Math.hypot(p[0] - a[0], p[1] - a[1]);
++  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lengthSq));
++  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
++}
++
++/** Douglas-Peucker on a closed ring (iterative: boundaries can have 100k+ points). */
++function simplifyRing(ring: readonly LngLat[], tolerance: number): LngLat[] | null {
++  const last = ring.length - 1;
++  const keep = new Uint8Array(ring.length);
++  keep[0] = 1;
++  keep[last] = 1;
++
++  const stack: Array<[number, number]> = [[0, last]];
++  while (stack.length > 0) {
++    const range = stack.pop() as [number, number];
++    const [lo, hi] = range;
++    const a = ring[lo] as LngLat;
++    const b = ring[hi] as LngLat;
++    let maxDistance = 0;
++    let index = -1;
++    for (let i = lo + 1; i < hi; i++) {
++      const d = distanceToSegment(ring[i] as LngLat, a, b);
++      if (d > maxDistance) {
++        maxDistance = d;
++        index = i;
++      }
++    }
++    if (index !== -1 && maxDistance > tolerance) {
++      keep[index] = 1;
++      stack.push([lo, index], [index, hi]);
++    }
++  }
++
++  const out: LngLat[] = [];
++  for (let i = 0; i < ring.length; i++) if (keep[i]) out.push(ring[i] as LngLat);
++  return out.length >= 4 ? out : null; // fewer is no longer an area
++}
++
++function simplifyOnce(polygons: readonly (readonly (readonly LngLat[])[])[], tolerance: number): LngLat[][][] {
++  const out: LngLat[][][] = [];
++  for (const rings of polygons) {
++    const outer = simplifyRing(rings[0] as readonly LngLat[], tolerance);
++    if (!outer) continue; // an island too small for this tolerance disappears
++    const kept: LngLat[][] = [outer];
++    for (const hole of rings.slice(1)) {
++      const s = simplifyRing(hole, tolerance);
++      if (s) kept.push(s);
++    }
++    out.push(kept);
++  }
++  return out;
++}
++
++/** Last resort for absurd caps: the biggest polygon's outer ring, thinned evenly. */
++function decimateLargest(polygons: readonly (readonly (readonly LngLat[])[])[], maxPoints: number): LngLat[][][] {
++  let best: readonly LngLat[] = [];
++  for (const rings of polygons) {
++    const outer = rings[0] as readonly LngLat[];
++    if (outer.length > best.length) best = outer;
++  }
++  const open = best.slice(0, -1);
++  const budget = Math.max(3, maxPoints - 1);
++  const step = Math.max(1, Math.ceil(open.length / budget));
++  const thinned: LngLat[] = [];
++  for (let i = 0; i < open.length; i += step) thinned.push(open[i] as LngLat);
++  const start = thinned[0] as LngLat;
++  thinned.push([start[0], start[1]]);
++  return [[thinned]];
++}
++
++/**
++ * Returns the polygons unchanged if they fit in `maxPoints`; otherwise the
++ * smallest simplification (Douglas-Peucker, tolerance in degrees) that fits.
++ * Holes and islands survive as long as they are bigger than the tolerance.
++ */
++export function simplifyPolygons(
++  polygons: LngLat[][][],
++  maxPoints: number
++): LngLat[][][] {
++  if (countPoints(polygons) <= maxPoints) return polygons;
++
++  // Each pass simplifies the previous (already smaller) result, so the cost is
++  // dominated by the first pass instead of repeating on the full input.
++  let current = polygons;
++  let tolerance = 0.0005;
++  for (let step = 0; step < 30; step++) {
++    const next = simplifyOnce(current, tolerance);
++    if (next.length === 0) break;
++    current = next;
++    if (countPoints(current) <= maxPoints) return current;
++    tolerance *= 1.7;
++  }
++  return decimateLargest(polygons, maxPoints);
++}
+diff --git a/packages/server/src/sceneOps.ts b/packages/server/src/sceneOps.ts
+index d2572fd..e67d459 100644
+--- a/packages/server/src/sceneOps.ts
++++ b/packages/server/src/sceneOps.ts
+@@ -1,4 +1,5 @@
+ import { MAX_SCENE_WIRE_OBJECTS, isValidColor } from "@map-renderer/shared";
++import type { RouteResult } from "./services/RoutingService.js";
+ import type { LabelObject, LngLat, MarkerObject, PathObject, PolygonObject } from "@map-renderer/shared";
+ import type { RequestContext } from "./RequestContext.js";
+ 
+@@ -240,7 +241,7 @@ export function addPath(
+   endName: string,
+   start: LngLat,
+   end: LngLat,
+-  line: LngLat[] | null,
++  route: RouteResult | null,
+   style?: PathInput
+ ): string {
+   const notes: string[] = [];
+@@ -248,19 +249,26 @@ export function addPath(
+   if (ctx.keys.has(key)) {
+     return summary(ctx, [`Path ${startName} → ${endName} already exists; not duplicated.`], notes);
+   }
+-  if (line === null) throw new Error("Internal error: route missing for a new path.");
++  if (route === null) throw new Error("Internal error: route missing for a new path.");
+   assertCapacity(ctx, 1);
+ 
+   const path: PathObject = {
+     type: "path",
+     id: crypto.randomUUID(),
+     name: name(`${startName} → ${endName}`),
+-    coordinates: line,
++    coordinates: route.coordinates,
+     color: color(style?.color, "#0066ff", "path color", notes),
+     opacity: clamp(style?.opacity, 0, 1, "opacity", notes) ?? 1,
+     width: clamp(style?.width, 1, 8, "width", notes) ?? 4,
+-    dash: style?.dash ?? false,
++    // A straight line is not a road: dashed by default so it does not look like one.
++    dash: style?.dash ?? route.straight,
+   };
++  if (route.straight) {
++    notes.push(
++      `No road route exists between ${startName} and ${endName} (for example across water), ` +
++        "so a straight line was drawn instead of a driving route."
++    );
++  }
+   ctx.add(path);
+   ctx.keys.set(key, path.id);
+   return summary(ctx, [`Created path ${startName} → ${endName}.`], notes);
+diff --git a/packages/server/src/services/BoundaryService.ts b/packages/server/src/services/BoundaryService.ts
+index 6760a43..f694ae8 100644
+--- a/packages/server/src/services/BoundaryService.ts
++++ b/packages/server/src/services/BoundaryService.ts
+@@ -1,4 +1,6 @@
++import { MAX_POLYGON_POINTS } from "@map-renderer/shared";
+ import type { LngLat } from "@map-renderer/shared";
++import { parseGeoJsonPolygons, simplifyPolygons } from "../geometry.js";
+ import {
+   PromiseCache,
+   REQUEST_TIMEOUT_MS,
+@@ -6,11 +8,14 @@ import {
+   normalizeQuery,
+ } from "./nominatim.js";
+ 
+-interface GeoJsonGeometry {
+-  type: string;
+-  coordinates: unknown;
++function maxPointsFromEnv(): number {
++  const n = Number(process.env.POLYGON_MAX_POINTS);
++  const value = Number.isInteger(n) && n >= 10 ? n : 20_000;
++  return Math.min(value, MAX_POLYGON_POINTS);
+ }
+ 
++const POLYGON_MAX_POINTS = maxPointsFromEnv();
++
+ export class BoundaryService {
+   private readonly cache = new PromiseCache<LngLat[][][]>(100);
+ 
+@@ -27,6 +32,9 @@ export class BoundaryService {
+       q: location,
+       format: "geojson",
+       polygon_geojson: "1",
++      // Ask for a slightly simplified shape (tolerance in degrees, about 100 m):
++      // invisible on a map, but much smaller for countries.
++      polygon_threshold: "0.001",
+       limit: "1",
+     });
+ 
+@@ -60,35 +68,15 @@ export class BoundaryService {
+       );
+     }
+ 
+-    const ring = this.extractOuterRing(geometry);
++    // Every polygon (islands) and every ring (holes), capped in size.
++    const polygons = parseGeoJsonPolygons(geometry);
+ 
+-    if (ring.length < 3) {
++    if (polygons.length === 0) {
+       throw new Error(
+         `No valid coordinates found for "${location}".`
+       );
+     }
+ 
+-    // Still only the first polygon's outer ring (islands/holes: flaw B1, later).
+-    return [[ring]];
+-  }
+-
+-  private extractOuterRing(geometry: GeoJsonGeometry): LngLat[] {
+-    let ring: unknown;
+-
+-    if (geometry.type === "Polygon") {
+-      ring = (geometry.coordinates as number[][][])[0];
+-    } else if (geometry.type === "MultiPolygon") {
+-      ring = (geometry.coordinates as number[][][][])[0]?.[0];
+-    } else {
+-      throw new Error(
+-        `Unsupported geometry type: ${geometry.type}. Expected Polygon or MultiPolygon.`
+-      );
+-    }
+-
+-    const points: LngLat[] = [];
+-    for (const pair of (ring as [number, number][] | undefined) ?? []) {
+-      points.push([pair[0], pair[1]]);
+-    }
+-    return points;
++    return simplifyPolygons(polygons, POLYGON_MAX_POINTS);
+   }
+ }
+diff --git a/packages/server/src/services/RoutingService.ts b/packages/server/src/services/RoutingService.ts
+index df46b7f..175257e 100644
+--- a/packages/server/src/services/RoutingService.ts
++++ b/packages/server/src/services/RoutingService.ts
+@@ -1,7 +1,16 @@
+ import type { LngLat } from "@map-renderer/shared";
+ 
++export interface RouteResult {
++  coordinates: LngLat[];
++  /** true = no road route exists, so this is just a straight line start -> end. */
++  straight: boolean;
++}
++
++/** OSRM answers with these codes when two points cannot be joined by road. */
++const UNROUTABLE_CODES = new Set(["NoRoute", "NoSegment"]);
++
+ export class RoutingService {
+-  public async getRoute(start: LngLat, end: LngLat): Promise<LngLat[]> {
++  public async getRoute(start: LngLat, end: LngLat): Promise<RouteResult> {
+     const url =
+       `https://router.project-osrm.org/route/v1/driving/` +
+       `${start[0]},${start[1]};${end[0]},${end[1]}` +
+@@ -9,18 +18,39 @@ export class RoutingService {
+ 
+     const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+ 
++    // OSRM reports "no route" inside a JSON body (HTTP 200 for NoRoute, 400
++    // for NoSegment), so read the body before looking at the status.
++    let data: { code?: unknown; routes?: unknown } | null = null;
++    try {
++      data = (await response.json()) as { code?: unknown; routes?: unknown } | null;
++    } catch {
++      data = null;
++    }
++
++    const straight: RouteResult = { coordinates: [start, end], straight: true };
++
++    if (typeof data?.code === "string" && UNROUTABLE_CODES.has(data.code)) {
++      return straight;
++    }
++
++    // A real outage (5xx, 429, timeouts, garbage) is NOT "no route": a straight
++    // line would pass off a guess as a driving route.
+     if (!response.ok) {
+-      throw new Error("Failed to fetch route.");
++      throw new Error(`Routing service failed (HTTP ${response.status}).`);
+     }
+ 
+-    const data = await response.json();
++    const routes = data?.routes;
++    if (Array.isArray(routes) && routes.length === 0) return straight;
+ 
+-    if (!data.routes || data.routes.length === 0) {
+-      throw new Error("No route found.");
++    const coordinates = (routes as Array<{ geometry?: { coordinates?: unknown } }> | undefined)?.[0]
++      ?.geometry?.coordinates;
++    if (!Array.isArray(coordinates) || coordinates.length < 2) {
++      throw new Error("Routing service returned an unreadable route.");
+     }
+ 
+-    return (data.routes[0].geometry.coordinates as [number, number][]).map(
+-      ([lng, lat]): LngLat => [lng, lat]
+-    );
++    return {
++      coordinates: (coordinates as [number, number][]).map(([lng, lat]): LngLat => [lng, lat]),
++      straight: false,
++    };
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/packages/server/src/tools/createPath.ts b/packages/server/src/tools/createPath.ts
+index fa7aa2c..685abeb 100644
+--- a/packages/server/src/tools/createPath.ts
++++ b/packages/server/src/tools/createPath.ts
+@@ -17,6 +17,7 @@ export function registerCreatePathTool(
+     {
+       description:
+         "Draw a driving route between two places. For more than two stops, call it once per consecutive pair. " +
++        "If no road connects the two places (for example across water), a straight line is drawn instead and you are told. " +
+         "Safe to call twice: an identical path is ignored. Does not add markers or labels.",
+ 
+       inputSchema: z.object({
+@@ -38,12 +39,12 @@ export function registerCreatePathTool(
+       const endPoint = await geocodingService.getCoordinates(end);
+ 
+       // Skip the routing request entirely if this exact path is already in the scene.
+-      const line = hasPath(context, startPoint, endPoint)
++      const route = hasPath(context, startPoint, endPoint)
+         ? null
+         : await routingService.getRoute(startPoint, endPoint);
+ 
+       // addPath re-checks synchronously, so two parallel identical calls cannot both insert.
+-      const text = addPath(context, start, end, startPoint, endPoint, line, style);
++      const text = addPath(context, start, end, startPoint, endPoint, route, style);
+ 
+       return { content: [{ type: "text", text }] };
+     }
+diff --git a/packages/server/test/e2e-geometry-routes.mjs b/packages/server/test/e2e-geometry-routes.mjs
+new file mode 100644
+index 0000000..d1db065
+--- /dev/null
++++ b/packages/server/test/e2e-geometry-routes.mjs
+@@ -0,0 +1,146 @@
++/* eslint-disable */
++// B1 (all polygons + holes, size cap) and B3 (straight-line fallback when no road route exists),
++// through the real MCP server with Nominatim/OSRM stubbed.
++// Runs the REAL built server as a child process; talks to it with the real MCP SDK client.
++// Usage (repo root, after building shared + server):  node packages/server/test/e2e-geometry-routes.mjs
++import { spawn } from "node:child_process";
++import { fileURLToPath, pathToFileURL } from "node:url";
++import path from "node:path";
++import { parseScene } from "@map-renderer/shared";
++import { Client } from "@modelcontextprotocol/sdk/client/index.js";
++import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
++
++const here = path.dirname(fileURLToPath(import.meta.url));
++const SERVER_JS = path.resolve(here, "../dist/index.js");
++const STUB = path.resolve(here, "stub-network.mjs");
++const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++const results = [];
++const record = (name, ok, note = "") => {
++  results.push({ name, ok, note });
++  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${note ? "  -- " + note : ""}`);
++};
++async function guard(name, fn) {
++  try { await fn(); } catch (e) { record(`${name} (EXCEPTION)`, false, String(e.message ?? e).slice(0, 200)); }
++}
++
++async function startServer(port, env = {}) {
++  const child = spawn(process.execPath, ["--import", pathToFileURL(STUB).href, SERVER_JS], {
++    env: { ...process.env, PORT: String(port), NOMINATIM_MIN_INTERVAL_MS: "0", ...env },
++    stdio: ["ignore", "ignore", "pipe"],
++  });
++  let log = "";
++  child.stderr.on("data", (d) => (log += d));
++  for (let i = 0; i < 50; i++) {
++    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return { child, getLog: () => log, port }; } catch {}
++    await sleep(100);
++  }
++  child.kill();
++  throw new Error("server did not start: " + log);
++}
++const stop = (s) => new Promise((r) => { s.child.once("exit", r); s.child.kill(); });
++
++async function connect(port) {
++  const client = new Client({ name: "rules", version: "1.0.0" });
++  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
++  return client;
++}
++const text = (r) => r.content.map((c) => c.text ?? "").join("");
++const call = (c, name, args = {}) => c.callTool({ name, arguments: args }, undefined, { timeout: 10000 });
++const scene = async (c) => JSON.parse(text(await call(c, "renderScene"))).objects;
++const ofType = (objs, t) => objs.filter((o) => o.type === t);
++const countLog = (S, needle) => S.getLog().split("\n").filter((l) => l.includes(needle)).length;
++
++const totalPoints = (polygons) => polygons.reduce((n, poly) => n + poly.reduce((m, r) => m + r.length, 0), 0);
++const closed = (r) => r.length >= 4 && r[0][0] === r[r.length - 1][0] && r[0][1] === r[r.length - 1][1];
++
++async function main() {
++  const S = await startServer(3961);
++  const S2 = await startServer(3962, { POLYGON_MAX_POINTS: "500" });
++  try {
++    await guard("G", async () => {
++      const cl = await connect(S.port);
++
++      await call(cl, "createPolygon", { location: "Archipelago A" });
++      let pg = (await scene(cl)).find((o) => o.type === "polygon");
++      record("G1 every polygon of a MultiPolygon is kept (island not lost)", pg && pg.polygons.length === 2, `polygons=${pg?.polygons.length}`);
++      record("G1b holes are kept (mainland has outer ring + 1 hole)", pg && pg.polygons[0].length === 2 && pg.polygons[1].length === 1, JSON.stringify(pg?.polygons.map((p) => p.length)));
++      record("G1c output is still valid for the shared schema", await (async () => { try { parseScene(JSON.parse(text(await call(cl, "renderScene")))); return true; } catch (e) { return false; } })());
++
++      const again = await call(cl, "createPolygon", { location: "archipelago a" });
++      record("G1d duplicate multipolygon is still de-duplicated", (await scene(cl)).filter((o) => o.type === "polygon").length === 1, text(again).slice(0, 80));
++
++      const cl2 = await connect(S.port);
++      await call(cl2, "createPolygon", { location: "Badrings" });
++      pg = (await scene(cl2)).find((o) => o.type === "polygon");
++      record("G2 degenerate rings dropped, good ones kept (1 polygon, no 2-point hole, non-finite point removed)",
++        pg && pg.polygons.length === 2 && pg.polygons[0].length === 1 && pg.polygons.every((p) => p.every((r) => r.length >= 4 && closed(r))),
++        JSON.stringify(pg?.polygons.map((p) => p.map((r) => r.length))));
++    });
++
++    await guard("G3", async () => {
++      const cl = await connect(S.port);
++      const t0 = Date.now();
++      const r = await call(cl, "createPolygon", { location: "Bigland" });
++      const ms = Date.now() - t0;
++      const raw = JSON.parse(text(await call(cl, "renderScene")));
++      let ok = true, err = ""; try { parseScene(raw); } catch (e) { ok = false; err = e.message; }
++      const pg = raw.objects.find((o) => o.type === "polygon");
++      const n = pg ? totalPoints(pg.polygons) : -1;
++      record("G3 200k-point boundary is simplified under the default cap (20000), still valid", !r.isError && ok && n > 100 && n <= 20000, `points=${n} ms=${ms} ${err}`);
++      record("G3b the hole survives simplification and the shape keeps its size", pg && pg.polygons[0].length === 2 && (() => { const xs = pg.polygons[0][0].map((p) => p[0]); return Math.min(...xs) < 75.5 && Math.max(...xs) > 84.5; })());
++
++      const c2 = await connect(S2.port);
++      await call(c2, "createPolygon", { location: "Bigland" });
++      const pg2 = (await scene(c2)).find((o) => o.type === "polygon");
++      const n2 = pg2 ? totalPoints(pg2.polygons) : -1;
++      record("G3c POLYGON_MAX_POINTS env is honoured (500)", n2 > 10 && n2 <= 500, `points=${n2}`);
++    });
++
++    await guard("G4", async () => {
++      const cl = await connect(S.port);
++      const r = await call(cl, "createPolygon", { location: "Pointplace" });
++      record("G4 a Point result still fails clearly (B2 will improve this; passes on old code too)", r.isError === true && /Unsupported geometry/.test(text(r)), text(r).slice(0, 100));
++      record("G5 simplified geometry requested from Nominatim (polygon_threshold)", /kind=boundary q=Archipelago A thr=0\.\d+/.test(S.getLog()), "");
++    });
++
++    await guard("R", async () => {
++      const cl = await connect(S.port);
++      const r = await call(cl, "createPath", { start: "Island One", end: "Delhi" });
++      const p = (await scene(cl)).find((o) => o.type === "path");
++      record("R1 NoRoute (HTTP 200) -> straight 2-point line, dashed by default, no error", !r.isError && p && p.coordinates.length === 2 && p.dash === true, `isError=${r.isError} coords=${p?.coordinates.length} dash=${p?.dash}`);
++      record("R1b the model is told it is a straight line", /straight line/i.test(text(r)), text(r).slice(0, 200));
++      record("R1c line runs from start to end", p && Math.abs(p.coordinates[0][0] - 120) < 2 && Math.abs(p.coordinates[1][0] - 120) > 5);
++
++      const cl2 = await connect(S.port);
++      const r2 = await call(cl2, "createPath", { start: "Reef Two", end: "Delhi" });
++      const p2 = (await scene(cl2)).find((o) => o.type === "path");
++      record("R2 NoSegment (HTTP 400) -> straight line too", !r2.isError && p2 && p2.coordinates.length === 2, `isError=${r2.isError} ${text(r2).slice(0, 80)}`);
++
++      const cl3 = await connect(S.port);
++      const r3 = await call(cl3, "createPath", { start: "Outage Three", end: "Delhi" });
++      record("R3 routing service failure (HTTP 500) is still an error, NOT a fake straight line", r3.isError === true && (await scene(cl3)).length === 0, text(r3).slice(0, 100));
++
++      const cl4 = await connect(S.port);
++      await call(cl4, "createPath", { start: "Island Four", end: "Delhi", style: { dash: false } });
++      const p4 = (await scene(cl4)).find((o) => o.type === "path");
++      record("R4 an explicit dash:false is respected on a straight line", p4 && p4.dash === false);
++
++      const cl5 = await connect(S.port);
++      await call(cl5, "createPath", { start: "Delhi", end: "Mumbai" });
++      const p5 = (await scene(cl5)).find((o) => o.type === "path");
++      record("R5 normal road route unchanged (3 points, solid)", p5 && p5.coordinates.length === 3 && p5.dash === false);
++
++      const cl6 = await connect(S.port);
++      const before = countLog(S, "[stub] osrm");
++      await call(cl6, "createPath", { start: "Island Six", end: "Delhi" });
++      const mid = countLog(S, "[stub] osrm");
++      const dup = await call(cl6, "createPath", { start: "island six", end: "delhi" });
++      record("R6 repeating a straight-line path is ignored and does not call OSRM again", (await scene(cl6)).filter((o) => o.type === "path").length === 1 && countLog(S, "[stub] osrm") === mid && mid - before === 1, text(dup).slice(0, 80));
++    });
++  } finally { await stop(S); await stop(S2); }
++
++  const failed = results.filter((r) => !r.ok);
++  console.log(`\n${results.length - failed.length}/${results.length} passed`);
++  process.exit(failed.length ? 1 : 0);
++}
++main().catch((e) => { console.error("HARNESS ERROR", e); process.exit(2); });
+diff --git a/packages/server/test/geometry.test.mjs b/packages/server/test/geometry.test.mjs
+new file mode 100644
+index 0000000..f789be8
+--- /dev/null
++++ b/packages/server/test/geometry.test.mjs
+@@ -0,0 +1,100 @@
++// Unit tests for the pure geometry helpers (uses built output: run after building shared + server).
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { parseScene } from "@map-renderer/shared";
++import { countPoints, parseGeoJsonPolygons, simplifyPolygons } from "../dist/geometry.js";
++
++const square = (x, y, d) => [[x, y], [x + d, y], [x + d, y + d], [x, y + d], [x, y]];
++const closed = (r) => r.length >= 4 && r[0][0] === r.at(-1)[0] && r[0][1] === r.at(-1)[1];
++const wiggly = (n, cx, cy, r, amp = 0.3, waves = 40) => {
++  let seed = 7; const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
++  const ring = [];
++  for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2, rr = r + amp * Math.sin(a * waves) + (rnd() - 0.5) * 0.02; ring.push([cx + rr * Math.cos(a), cy + rr * Math.sin(a)]); }
++  ring.push(ring[0]); return ring;
++};
++const asScene = (polygons) => parseScene({ version: 1, objects: [{ type: "polygon", id: "p", name: "p", polygons, fillColor: "red", fillOpacity: 0.4, borderWidth: 0, borderDash: false }] });
++
++test("Polygon: outer ring + holes kept; open ring is closed; duplicate points removed", () => {
++  const open = [[0, 0], [0, 0], [4, 0], [4, 4], [0, 4]];
++  const out = parseGeoJsonPolygons({ type: "Polygon", coordinates: [open, square(1, 1, 1)] });
++  assert.equal(out.length, 1);
++  assert.equal(out[0].length, 2);
++  assert.ok(out[0].every(closed));
++  assert.equal(out[0][0].length, 5);
++});
++
++test("MultiPolygon: every polygon is kept, in order", () => {
++  const out = parseGeoJsonPolygons({ type: "MultiPolygon", coordinates: [[square(0, 0, 3)], [square(10, 10, 1)], [square(20, 20, 1), square(20.2, 20.2, 0.3)]] });
++  assert.deepEqual(out.map((p) => p.length), [1, 1, 2]);
++});
++
++test("unusable rings: bad hole removed, bad outer drops the polygon (its holes are NOT promoted)", () => {
++  const out = parseGeoJsonPolygons({ type: "MultiPolygon", coordinates: [
++    [square(0, 0, 3), [[1, 1], [2, 2]]],
++    [[[5, 5], [6, 6]], square(5.2, 5.2, 0.5)],
++    [square(9, 9, 1)],
++  ] });
++  assert.deepEqual(out.map((p) => p.length), [1, 1]);
++  assert.equal(out[1][0][0][0], 9);
++});
++
++test("out-of-range and non-numeric points are skipped", () => {
++  const ring = [[0, 0], [4, 0], [999, 0], [4, 4], ["x", 1], [null, 2], [0, 4], [0, 0]];
++  const out = parseGeoJsonPolygons({ type: "Polygon", coordinates: [ring] });
++  assert.equal(out[0][0].length, 5);
++});
++
++test("non-polygon geometries are rejected with a clear message", () => {
++  for (const type of ["Point", "LineString", "GeometryCollection"]) {
++    assert.throws(() => parseGeoJsonPolygons({ type, coordinates: [] }), /Unsupported geometry type: .*Expected Polygon or MultiPolygon/);
++  }
++  assert.throws(() => parseGeoJsonPolygons({ type: "MultiPolygon", coordinates: "oops" }));
++});
++
++test("garbage input yields no polygons rather than throwing", () => {
++  assert.deepEqual(parseGeoJsonPolygons({ type: "Polygon", coordinates: [] }), []);
++  assert.deepEqual(parseGeoJsonPolygons({ type: "MultiPolygon", coordinates: [null, 5, [[]]] }), []);
++});
++
++test("simplify: input under the cap is returned untouched (same object)", () => {
++  const polys = [[square(0, 0, 1)]];
++  assert.equal(simplifyPolygons(polys, 100), polys);
++});
++
++test("simplify: over the cap -> within cap, rings closed, holes and big islands survive, valid scene", () => {
++  const polys = [
++    [wiggly(60_000, 0, 0, 5), square(-0.5, -0.5, 1)],     // mainland with hole
++    [wiggly(30_000, 20, 0, 2)],                            // big island
++    [square(40, 40, 0.0001)],                              // tiny islet
++  ];
++  const before = countPoints(polys);
++  const out = simplifyPolygons(polys, 5000);
++  assert.ok(countPoints(out) <= 5000 && countPoints(out) > 200, `points ${before} -> ${countPoints(out)}`);
++  assert.ok(out.every((p) => p.every(closed)));
++  assert.equal(out[0].length, 2, "hole survives");
++  assert.ok(out.length >= 2 && out.length <= 3, "big island survives");
++  assert.ok(out.some((p) => p[0].some((pt) => pt[0] > 21)), "second landmass is still where it was");
++  asScene(out); // passes the shared schema
++});
++
++test("simplify: tiny islands are dropped only when the cap forces it", () => {
++  const polys = [[wiggly(20_000, 0, 0, 5)], [square(40, 40, 0.0001)]];
++  assert.equal(simplifyPolygons(polys, 25_000).length, 2, "fits: nothing dropped");
++  assert.equal(simplifyPolygons(polys, 3000).length, 1, "cap forces the islet away");
++});
++
++test("simplify: absurdly small cap still returns one valid ring", () => {
++  const polys = [[wiggly(10_000, 0, 0, 5)], [wiggly(500, 20, 0, 1)]];
++  const out = simplifyPolygons(polys, 10);
++  assert.equal(out.length >= 1, true);
++  assert.ok(countPoints(out) <= 10 + 5, `points ${countPoints(out)}`);
++  assert.ok(out.every((p) => p.every(closed)));
++  asScene(out);
++});
++
++test("simplify: 300k points is fast enough (< 3 s) and does not blow the stack", () => {
++  const t0 = Date.now();
++  const out = simplifyPolygons([[wiggly(300_000, 0, 0, 5)]], 20_000);
++  assert.ok(Date.now() - t0 < 3000, `took ${Date.now() - t0}ms`);
++  assert.ok(countPoints(out) <= 20_000);
++});
+diff --git a/packages/server/test/stub-network.mjs b/packages/server/test/stub-network.mjs
+index 5e8979c..f0042cf 100644
+--- a/packages/server/test/stub-network.mjs
++++ b/packages/server/test/stub-network.mjs
+@@ -17,21 +17,62 @@ function canonical(q) {
+ }
+ function coords(q) {
+   const h = hash(canonical(q));
++  // Special names land in longitude bands the OSRM stub treats as unroutable:
++  //   "island*" -> NoRoute (HTTP 200), "reef*" -> NoSegment (HTTP 400), "outage*" -> HTTP 500
++  const c = canonical(q);
++  const band = c.startsWith("island") ? 120 : c.startsWith("reef") ? 130 : c.startsWith("outage") ? 140 : null;
++  if (band !== null) return { lat: 5 + (h % 100) / 10, lon: band + (h % 10) / 10 };
+   return { lat: 8 + (h % 2900) / 100, lon: 68 + ((h >> 8) % 2900) / 100 };
+ }
++// Deterministic "coastline": a wiggly closed ring with n points (n > cap forces simplification).
++function coastline(n, cx, cy, r) {
++  let seed = 12345;
++  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
++  const ring = [];
++  for (let i = 0; i < n; i++) {
++    const a = (i / n) * Math.PI * 2;
++    const rr = r + 0.3 * Math.sin(a * 40) + (rnd() - 0.5) * 0.02;
++    ring.push([cx + rr * Math.cos(a), cy + rr * Math.sin(a)]);
++  }
++  ring.push(ring[0]);
++  return ring;
++}
++const square = (x, y, d) => [[x, y], [x + d, y], [x + d, y + d], [x, y + d], [x, y]];
+ globalThis.fetch = async (input, init) => {
+   const url = String(typeof input === "string" ? input : input.url ?? input);
+   if (url.includes("nominatim.openstreetmap.org")) {
+     const u = new URL(url);
+     const q = u.searchParams.get("q") ?? "";
+     const kind = u.searchParams.get("format") === "geojson" ? "boundary" : "geocode";
+-    console.error(`[stub] nominatim t=${Date.now()} kind=${kind} q=${q}`);
++    console.error(`[stub] nominatim t=${Date.now()} kind=${kind} q=${q} thr=${u.searchParams.get("polygon_threshold") ?? ""}`);
+     await sleep(20 + Math.floor(Math.random() * 40)); // jitter so requests really interleave
+     if (q.toLowerCase().includes("nowhere")) {
+       return Response.json(kind === "boundary" ? { features: [] } : []);
+     }
+     const { lat, lon } = coords(q);
+     if (kind === "boundary") {
++      const cq = q.toLowerCase();
++      // archipelago: mainland WITH a hole + a separate island
++      if (cq.startsWith("archipelago")) {
++        return Response.json({ features: [{ geometry: { type: "MultiPolygon", coordinates: [
++          [square(10, 10, 4), square(11, 11, 1)],
++          [square(20, 10, 1)],
++        ] } }] });
++      }
++      // junk rings mixed with good ones: bad hole (2 pts), bad island (2 pts), non-finite point
++      if (cq.startsWith("badrings")) {
++        return Response.json({ features: [{ geometry: { type: "MultiPolygon", coordinates: [
++          [square(10, 10, 4), [[11, 11], [12, 12]]],
++          [[[30, 30], [31, 31]]],
++          [[[40, 40], [41, 40], [null, 5], [41, 41], [40, 41], [40, 40]]],
++        ] } }] });
++      }
++      if (cq.startsWith("bigland")) {
++        return Response.json({ features: [{ geometry: { type: "Polygon", coordinates: [coastline(200000, 80, 20, 5), square(79, 19, 1)] } }] });
++      }
++      if (cq.startsWith("pointplace")) {
++        return Response.json({ features: [{ geometry: { type: "Point", coordinates: [lon, lat] } }] });
++      }
+       const d = 0.5;
+       return Response.json({ features: [{ geometry: { type: "Polygon", coordinates: [[[lon, lat], [lon + d, lat], [lon + d, lat + d], [lon, lat + d], [lon, lat]]] } }] });
+     }
+@@ -40,7 +81,12 @@ globalThis.fetch = async (input, init) => {
+   if (url.includes("router.project-osrm.org")) {
+     console.error(`[stub] osrm t=${Date.now()}`);
+     await sleep(20 + Math.floor(Math.random() * 40));
+-    return Response.json({ routes: [{ geometry: { coordinates: [[68, 8], [69, 9], [70, 10]] } }] });
++    const lons = (url.match(/driving\/([^?]+)/)?.[1] ?? "").split(";").map((p) => Number(p.split(",")[0]));
++    const band = (b) => lons.some((x) => x >= b && x < b + 1);
++    if (band(120)) return Response.json({ code: "NoRoute", message: "Impossible route between points" });
++    if (band(130)) return Response.json({ code: "NoSegment", message: "Could not find a matching segment for coordinate 0" }, { status: 400 });
++    if (band(140)) return new Response("upstream exploded", { status: 500 });
++    return Response.json({ code: "Ok", routes: [{ geometry: { coordinates: [[68, 8], [69, 9], [70, 10]] } }] });
+   }
+   return realFetch(input, init);
+ };
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 8bb6a0f..44a3a1c 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -2,6 +2,7 @@ export { isValidColor } from "./colors.js";
+ export {
+   SCENE_VERSION,
+   MAX_SCENE_WIRE_OBJECTS,
++  MAX_POLYGON_POINTS,
+   SceneValidationError,
+   emptyScene,
+   parseScene,
+diff --git a/packages/shared/src/scene.ts b/packages/shared/src/scene.ts
+index d969434..5292315 100644
+--- a/packages/shared/src/scene.ts
++++ b/packages/shared/src/scene.ts
+@@ -10,6 +10,8 @@ import { isValidColor } from "./colors.js";
+ 
+ export const SCENE_VERSION = 1;
+ export const MAX_SCENE_WIRE_OBJECTS = 500;
++/** Hard ceiling on the total points of one polygon object (all polygons and rings). */
++export const MAX_POLYGON_POINTS = 100_000;
+ 
+ /** [longitude, latitude] (GeoJSON order). */
+ const lngLat = z.tuple([
+@@ -100,6 +102,18 @@ export const sceneSchema = z
+         });
+       }
+       seen.add(o.id);
++
++      if (o.type === "polygon") {
++        let points = 0;
++        for (const rings of o.polygons) for (const r of rings) points += r.length;
++        if (points > MAX_POLYGON_POINTS) {
++          ctx.addIssue({
++            code: "custom",
++            path: ["objects", i, "polygons"],
++            message: `too many points (${points}; the limit is ${MAX_POLYGON_POINTS})`,
++          });
++        }
++      }
+     });
+   });
+ 
+diff --git a/packages/shared/test/scene.test.ts b/packages/shared/test/scene.test.ts
+index 4ee45b4..969eb6c 100644
+--- a/packages/shared/test/scene.test.ts
++++ b/packages/shared/test/scene.test.ts
+@@ -109,6 +109,12 @@ test("polygon ring with fewer than 3 points fails", () => {
+   rejects(scene([polygon({ polygons: [[[[0, 0], [1, 1]]]] })]), /objects\[0\]\.polygons\[0\]\[0\]/);
+ });
+ 
++test("polygon with too many points fails (counted over all polygons and rings)", () => {
++  const ring = (n: number) => Array.from({ length: n }, (_, i) => [i % 180, (i % 90)]);
++  parseScene(scene([polygon({ polygons: [[ring(50_000)], [ring(50_000)]] })]));
++  rejects(scene([polygon({ polygons: [[ring(50_000)], [ring(50_001)]] })]), /objects\[0\]\.polygons: too many points/);
++});
++
+ test("empty polygon list / path with 1 point fail", () => {
+   rejects(scene([polygon({ polygons: [] })]), /objects\[0\]\.polygons/);
+   rejects(scene([path({ coordinates: [[0, 0]] })]), /objects\[0\]\.coordinates/);

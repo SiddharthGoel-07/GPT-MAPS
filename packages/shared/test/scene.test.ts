@@ -109,6 +109,12 @@ test("polygon ring with fewer than 3 points fails", () => {
   rejects(scene([polygon({ polygons: [[[[0, 0], [1, 1]]]] })]), /objects\[0\]\.polygons\[0\]\[0\]/);
 });
 
+test("polygon with too many points fails (counted over all polygons and rings)", () => {
+  const ring = (n: number) => Array.from({ length: n }, (_, i) => [i % 180, (i % 90)]);
+  parseScene(scene([polygon({ polygons: [[ring(50_000)], [ring(50_000)]] })]));
+  rejects(scene([polygon({ polygons: [[ring(50_000)], [ring(50_001)]] })]), /objects\[0\]\.polygons: too many points/);
+});
+
 test("empty polygon list / path with 1 point fail", () => {
   rejects(scene([polygon({ polygons: [] })]), /objects\[0\]\.polygons/);
   rejects(scene([path({ coordinates: [[0, 0]] })]), /objects\[0\]\.coordinates/);

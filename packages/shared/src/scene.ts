@@ -10,6 +10,8 @@ import { isValidColor } from "./colors.js";
 
 export const SCENE_VERSION = 1;
 export const MAX_SCENE_WIRE_OBJECTS = 500;
+/** Hard ceiling on the total points of one polygon object (all polygons and rings). */
+export const MAX_POLYGON_POINTS = 100_000;
 
 /** [longitude, latitude] (GeoJSON order). */
 const lngLat = z.tuple([
@@ -100,6 +102,18 @@ export const sceneSchema = z
         });
       }
       seen.add(o.id);
+
+      if (o.type === "polygon") {
+        let points = 0;
+        for (const rings of o.polygons) for (const r of rings) points += r.length;
+        if (points > MAX_POLYGON_POINTS) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["objects", i, "polygons"],
+            message: `too many points (${points}; the limit is ${MAX_POLYGON_POINTS})`,
+          });
+        }
+      }
     });
   });
 

@@ -1,4 +1,6 @@
+import { MAX_POLYGON_POINTS } from "@map-renderer/shared";
 import type { LngLat } from "@map-renderer/shared";
+import { parseGeoJsonPolygons, simplifyPolygons } from "../geometry.js";
 import {
   PromiseCache,
   REQUEST_TIMEOUT_MS,
@@ -6,10 +8,13 @@ import {
   normalizeQuery,
 } from "./nominatim.js";
 
-interface GeoJsonGeometry {
-  type: string;
-  coordinates: unknown;
+function maxPointsFromEnv(): number {
+  const n = Number(process.env.POLYGON_MAX_POINTS);
+  const value = Number.isInteger(n) && n >= 10 ? n : 20_000;
+  return Math.min(value, MAX_POLYGON_POINTS);
 }
+
+const POLYGON_MAX_POINTS = maxPointsFromEnv();
 
 export class BoundaryService {
   private readonly cache = new PromiseCache<LngLat[][][]>(100);
@@ -27,6 +32,9 @@ export class BoundaryService {
       q: location,
       format: "geojson",
       polygon_geojson: "1",
+      // Ask for a slightly simplified shape (tolerance in degrees, about 100 m):
+      // invisible on a map, but much smaller for countries.
+      polygon_threshold: "0.001",
       limit: "1",
     });
 
@@ -60,35 +68,15 @@ export class BoundaryService {
       );
     }
 
-    const ring = this.extractOuterRing(geometry);
+    // Every polygon (islands) and every ring (holes), capped in size.
+    const polygons = parseGeoJsonPolygons(geometry);
 
-    if (ring.length < 3) {
+    if (polygons.length === 0) {
       throw new Error(
         `No valid coordinates found for "${location}".`
       );
     }
 
-    // Still only the first polygon's outer ring (islands/holes: flaw B1, later).
-    return [[ring]];
-  }
-
-  private extractOuterRing(geometry: GeoJsonGeometry): LngLat[] {
-    let ring: unknown;
-
-    if (geometry.type === "Polygon") {
-      ring = (geometry.coordinates as number[][][])[0];
-    } else if (geometry.type === "MultiPolygon") {
-      ring = (geometry.coordinates as number[][][][])[0]?.[0];
-    } else {
-      throw new Error(
-        `Unsupported geometry type: ${geometry.type}. Expected Polygon or MultiPolygon.`
-      );
-    }
-
-    const points: LngLat[] = [];
-    for (const pair of (ring as [number, number][] | undefined) ?? []) {
-      points.push([pair[0], pair[1]]);
-    }
-    return points;
+    return simplifyPolygons(polygons, POLYGON_MAX_POINTS);
   }
 }

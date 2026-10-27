@@ -2,6 +2,7 @@ export { isValidColor } from "./colors.js";
 export {
   SCENE_VERSION,
   MAX_SCENE_WIRE_OBJECTS,
+  MAX_POLYGON_POINTS,
   SceneValidationError,
   emptyScene,
   parseScene,
