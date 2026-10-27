@@ -14,7 +14,7 @@
     "dev:server": "npm run dev --workspace @map-renderer/server",
     "dev:ai": "npm run dev --workspace @map-renderer/ai-server",
     "dev:web": "npm run dev --workspace @map-renderer/web",
-    "test": "npm run test -w @map-renderer/shared && npm run test -w @map-renderer/server && npm run test -w @map-renderer/web"
+    "test": "npm run test -w @map-renderer/shared && npm run test -w @map-renderer/server && npm run test -w @map-renderer/ai-server && npm run test -w @map-renderer/web"
   },
   "devDependencies": {
     "@eslint/js": "^9.31.0",

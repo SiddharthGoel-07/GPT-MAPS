@@ -1,0 +1,2145 @@
+diff --git a/package.json b/package.json
+index 18cb7b8..06dd163 100644
+--- a/package.json
++++ b/package.json
+@@ -14,7 +14,7 @@
+     "dev:server": "npm run dev --workspace @map-renderer/server",
+     "dev:ai": "npm run dev --workspace @map-renderer/ai-server",
+     "dev:web": "npm run dev --workspace @map-renderer/web",
+-    "test": "npm run test -w @map-renderer/shared && npm run test -w @map-renderer/server && npm run test -w @map-renderer/web"
++    "test": "npm run test -w @map-renderer/shared && npm run test -w @map-renderer/server && npm run test -w @map-renderer/ai-server && npm run test -w @map-renderer/web"
+   },
+   "devDependencies": {
+     "@eslint/js": "^9.31.0",
+diff --git a/packages/ai-server/package.json b/packages/ai-server/package.json
+index 01aef0a..5d1ba6c 100644
+--- a/packages/ai-server/package.json
++++ b/packages/ai-server/package.json
+@@ -20,7 +20,8 @@
+     "clean": "node -e \"const fs=require('node:fs'); fs.rmSync('dist', { recursive: true, force: true });\"",
+     "watch": "tsc -p tsconfig.json --watch",
+     "dev": "tsx watch src/index.ts",
+-    "start": "node dist/index.js"
++    "start": "node dist/index.js",
++    "test": "node --import tsx --test test/*.test.ts && node test/e2e-chat.mjs"
+   },
+   "dependencies": {
+     "dotenv": "^17.4.2",
+diff --git a/packages/ai-server/src/chatLoop.ts b/packages/ai-server/src/chatLoop.ts
+new file mode 100644
+index 0000000..7e8fdb0
+--- /dev/null
++++ b/packages/ai-server/src/chatLoop.ts
+@@ -0,0 +1,212 @@
++import type { ChatLimits } from "./config.js";
++import { ChatError, deadlineError } from "./errors.js";
++
++/*
++ * The tool-calling loop, independent of Groq and of the MCP SDK so it can be
++ * tested with fakes. How it behaves:
++ *
++ *   - every tool call the model makes in a turn is executed, in order;
++ *   - the model's renderScene call only means "I am finished": the loop stops
++ *     after that turn and the CODE calls renderScene exactly once at the end;
++ *   - the reply is the model's own last text, or a summary of what was drawn;
++ *   - the loop is bounded by an iteration cap and by the request deadline.
++ */
++
++export interface McpToolInfo {
++  name: string;
++  description?: string | undefined;
++  inputSchema?: object | undefined;
++}
++
++export interface ToolCall {
++  id: string;
++  name: string;
++  /** Raw JSON string, exactly as the model produced it. */
++  arguments: string;
++}
++
++export interface LlmReply {
++  content: string | null;
++  toolCalls: ToolCall[];
++}
++
++export interface CallContext {
++  signal: AbortSignal;
++  deadlineAt: number;
++}
++
++export interface Llm {
++  complete(
++    messages: Array<Record<string, unknown>>,
++    tools: McpToolInfo[],
++    context: CallContext
++  ): Promise<LlmReply>;
++}
++
++export interface McpLike {
++  listTools(signal: AbortSignal): Promise<McpToolInfo[]>;
++  /** Returns the concatenated text blocks of the result. */
++  callTool(
++    name: string,
++    args: Record<string, unknown>,
++    signal: AbortSignal
++  ): Promise<{ text: string; isError: boolean }>;
++}
++
++export interface ChatResult {
++  scene: { objects: Array<{ type?: unknown }> } & Record<string, unknown>;
++  message: string;
++}
++
++export interface RunChatOptions {
++  prompt: string;
++  systemPrompt: string;
++  llm: Llm;
++  mcp: McpLike;
++  limits: ChatLimits;
++  context: CallContext;
++  log?: (message: string) => void;
++}
++
++function throwIfAborted(signal: AbortSignal): void {
++  if (signal.aborted) throw signal.reason ?? deadlineError();
++}
++
++function plural(count: number, noun: string): string {
++  return `${count} ${noun}${count === 1 ? "" : "s"}`;
++}
++
++export function summarizeScene(objects: ReadonlyArray<{ type?: unknown }>): string {
++  if (objects.length === 0) return "The map is empty.";
++  const counts = new Map<string, number>();
++  for (const o of objects) {
++    const type = typeof o.type === "string" ? o.type : "object";
++    counts.set(type, (counts.get(type) ?? 0) + 1);
++  }
++  const parts = [...counts].map(([type, n]) => plural(n, type));
++  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
++  return `Rendered ${list}.`;
++}
++
++export function validatePrompt(prompt: unknown, limits: ChatLimits): string {
++  if (typeof prompt !== "string" || prompt.trim() === "") {
++    throw new ChatError(400, "Missing prompt");
++  }
++  if (prompt.length > limits.maxPromptChars) {
++    throw new ChatError(400, `Prompt is too long (${prompt.length} characters; the limit is ${limits.maxPromptChars}).`);
++  }
++  return prompt;
++}
++
++export async function runChat(options: RunChatOptions): Promise<ChatResult> {
++  const { systemPrompt, llm, mcp, limits, context } = options;
++  const log = options.log ?? (() => undefined);
++  const { signal } = context;
++  const prompt = validatePrompt(options.prompt, limits);
++
++  const tools = await mcp.listTools(signal);
++
++  const messages: Array<Record<string, unknown>> = [
++    { role: "system", content: systemPrompt },
++    { role: "user", content: prompt },
++  ];
++
++  let modelText = "";
++  let finished = false;
++  let turns = 0;
++
++  while (turns < limits.maxToolIterations) {
++    throwIfAborted(signal);
++    turns++;
++
++    const reply = await llm.complete(messages, tools, context);
++    const text = reply.content?.trim();
++    if (text) modelText = text;
++
++    if (reply.toolCalls.length === 0) {
++      finished = true;
++      break;
++    }
++
++    log(`[AI] Turn ${turns}: ${reply.toolCalls.length} tool call(s)`);
++
++    messages.push({
++      role: "assistant",
++      content: reply.content ?? "",
++      tool_calls: reply.toolCalls.map((call) => ({
++        id: call.id,
++        type: "function",
++        function: { name: call.name, arguments: call.arguments },
++      })),
++    });
++
++    let renderRequested = false;
++
++    for (const call of reply.toolCalls) {
++      throwIfAborted(signal);
++
++      if (call.name === "renderScene") {
++        // Not executed here: the scene is rendered once, below, after ALL
++        // other calls of this turn have run.
++        renderRequested = true;
++        messages.push({
++          role: "tool",
++          tool_call_id: call.id,
++          content: "OK. The scene will be rendered automatically when you finish.",
++        });
++        continue;
++      }
++
++      log(`[AI] Calling MCP tool: ${call.name}`);
++      let toolText: string;
++      try {
++        const args = JSON.parse(call.arguments || "{}") as unknown;
++        if (typeof args !== "object" || args === null || Array.isArray(args)) {
++          throw new Error("Tool arguments must be a JSON object.");
++        }
++        const result = await mcp.callTool(call.name, args as Record<string, unknown>, signal);
++        toolText = result.text;
++      } catch (error) {
++        throwIfAborted(signal);
++        toolText = `Error: ${error instanceof Error ? error.message : String(error)}`;
++        log(`[AI] MCP tool failed: ${call.name}: ${toolText}`);
++      }
++      messages.push({ role: "tool", tool_call_id: call.id, content: toolText });
++    }
++
++    if (renderRequested) {
++      finished = true;
++      break;
++    }
++  }
++
++  throwIfAborted(signal);
++
++  // Single place where the scene is produced, whatever way the loop ended.
++  const rendered = await mcp.callTool("renderScene", {}, signal);
++  if (rendered.isError) {
++    throw new ChatError(502, `The map server could not render the scene: ${rendered.text}`);
++  }
++
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(rendered.text);
++  } catch {
++    throw new ChatError(502, "The map server returned an unreadable scene.");
++  }
++  if (
++    typeof parsed !== "object" || parsed === null ||
++    !Array.isArray((parsed as { objects?: unknown }).objects)
++  ) {
++    throw new ChatError(502, "The map server returned an invalid scene.");
++  }
++  const scene = parsed as ChatResult["scene"];
++
++  let message = modelText || summarizeScene(scene.objects);
++  if (!finished) {
++    log(`[AI] Stopped after ${turns} turn(s) without the model finishing.`);
++    message += `\n(Stopped after ${limits.maxToolIterations} steps, so the map may be incomplete.)`;
++  }
++
++  return { scene, message };
++}
+diff --git a/packages/ai-server/src/config.ts b/packages/ai-server/src/config.ts
+new file mode 100644
+index 0000000..808fad5
+--- /dev/null
++++ b/packages/ai-server/src/config.ts
+@@ -0,0 +1,22 @@
++export interface ChatLimits {
++  /** Longest accepted user prompt, in characters. */
++  maxPromptChars: number;
++  /** Most LLM round-trips per request. */
++  maxToolIterations: number;
++  /** Hard wall-clock limit for the whole request. */
++  requestTimeoutMs: number;
++}
++
++function positiveInt(value: string | undefined, fallback: number): number {
++  if (value === undefined || value.trim() === "") return fallback;
++  const n = Number(value);
++  return Number.isInteger(n) && n > 0 ? n : fallback;
++}
++
++export function readLimits(env: NodeJS.ProcessEnv = process.env): ChatLimits {
++  return {
++    maxPromptChars: positiveInt(env.MAX_PROMPT_CHARS, 1000),
++    maxToolIterations: positiveInt(env.MAX_TOOL_ITERATIONS, 10),
++    requestTimeoutMs: positiveInt(env.REQUEST_TIMEOUT_MS, 60_000),
++  };
++}
+diff --git a/packages/ai-server/src/errors.ts b/packages/ai-server/src/errors.ts
+new file mode 100644
+index 0000000..b160c9c
+--- /dev/null
++++ b/packages/ai-server/src/errors.ts
+@@ -0,0 +1,17 @@
++/**
++ * An error whose message is safe to show to the caller, with the HTTP status
++ * the API should answer with. Anything else is reported as a generic 500.
++ */
++export class ChatError extends Error {
++  public readonly status: number;
++
++  constructor(status: number, message: string, options?: { cause?: unknown }) {
++    super(message, options);
++    this.name = "ChatError";
++    this.status = status;
++  }
++}
++
++export function deadlineError(): ChatError {
++  return new ChatError(504, "The request took too long and was cancelled. Try a simpler prompt.");
++}
+diff --git a/packages/ai-server/src/groq.ts b/packages/ai-server/src/groq.ts
+new file mode 100644
+index 0000000..dd5fba5
+--- /dev/null
++++ b/packages/ai-server/src/groq.ts
+@@ -0,0 +1,69 @@
++import Groq from "groq-sdk";
++import type { CallContext, Llm, McpToolInfo } from "./chatLoop.js";
++import type { KeyPool } from "./keyPool.js";
++
++function toGroqTool(tool: McpToolInfo): Record<string, unknown> {
++  return {
++    type: "function",
++    function: {
++      name: tool.name,
++      description: tool.description ?? "",
++      parameters: tool.inputSchema ?? { type: "object", properties: {} },
++    },
++  };
++}
++
++export interface GroqLlmOptions {
++  pool: KeyPool;
++  model: string;
++  maxTokens?: number;
++  baseURL?: string | undefined;
++}
++
++export function createGroqLlm(options: GroqLlmOptions): Llm {
++  const clients = new Map<string, Groq>();
++
++  const clientFor = (apiKey: string): Groq => {
++    let client = clients.get(apiKey);
++    if (!client) {
++      // maxRetries: 0 -> retries and key rotation are handled by KeyPool only.
++      client = new Groq({
++        apiKey,
++        maxRetries: 0,
++        ...(options.baseURL ? { baseURL: options.baseURL } : {}),
++      });
++      clients.set(apiKey, client);
++    }
++    return client;
++  };
++
++  return {
++    async complete(messages, tools, context: CallContext) {
++      const response = await options.pool.run(
++        (key) =>
++          clientFor(key).chat.completions.create(
++            {
++              model: options.model,
++              messages: messages as never,
++              tools: tools.map(toGroqTool) as never,
++              max_tokens: options.maxTokens ?? 4096,
++            },
++            { signal: context.signal }
++          ),
++        context
++      );
++
++      const message = response.choices[0]?.message;
++      if (!message) throw new Error("No response from Groq.");
++
++      return {
++        content: message.content ?? null,
++        toolCalls: (message.tool_calls ?? []).map((call) => ({
++          id: call.id,
++          name: call.function.name,
++          arguments: call.function.arguments,
++        })),
++      };
++    },
++  };
++}
+diff --git a/packages/ai-server/src/index.ts b/packages/ai-server/src/index.ts
+index aa2ceba..27a062b 100644
+--- a/packages/ai-server/src/index.ts
++++ b/packages/ai-server/src/index.ts
+@@ -1,24 +1,18 @@
+ import "dotenv/config";
+ import { createServer as createHttpServer } from "node:http";
+-import Groq from "groq-sdk";
+-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
++import { runChat, validatePrompt } from "./chatLoop.js";
++import type { ChatResult } from "./chatLoop.js";
++import { readLimits } from "./config.js";
++import { ChatError, deadlineError } from "./errors.js";
++import { createGroqLlm } from "./groq.js";
++import { KeyPool } from "./keyPool.js";
++import { connectMcp } from "./mcp.js";
++import { SYSTEM_PROMPT } from "./prompt.js";
+ 
+ /*
+- * ---------------------------------------------------------
+- * GROQ API KEYS
+- * ---------------------------------------------------------
+- *
+- * Put your legitimate API keys in .env:
+- *
+- * GROQ_API_KEY_1=...
+- * GROQ_API_KEY_2=...
+- * GROQ_API_KEY_3=...
+- * GROQ_API_KEY_4=...
+- * GROQ_API_KEY_5=...
+- *
+- * The server will try them in order.
+- * If a key fails, the next key is tried.
++ * GROQ API KEYS (in .env): GROQ_API_KEY_1 ... GROQ_API_KEY_5
++ * Failure handling (which errors rotate keys, which are retried, which fail
++ * fast) lives in keyPool.ts.
+  */
+ 
+ const groqApiKeys = [
+@@ -34,738 +28,111 @@ if (groqApiKeys.length === 0) {
+   process.exit(1);
+ }
+ 
+-console.log(
+-  `[AI] Loaded ${groqApiKeys.length} Groq API key(s).`
+-);
+-
+-function getMcpServerUrl(): string {
+-  const url = process.env.MCP_SERVER_URL;
+-  if (!url) {
+-    throw new Error(
+-      "MCP_SERVER_URL environment variable is required."
+-    );
+-  }
+-  return url;
+-}
+-
+-const MCP_SERVER_URL = getMcpServerUrl();
+-
+-const MODEL =
+-  process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+-
+-interface ChatRequest {
+-  prompt: string;
+-}
++console.log(`[AI] Loaded ${groqApiKeys.length} Groq API key(s).`);
+ 
+-interface ChatResponse {
+-  scene: object;
+-  message: string;
++const MCP_SERVER_URL = process.env.MCP_SERVER_URL;
++if (!MCP_SERVER_URL) {
++  throw new Error("MCP_SERVER_URL environment variable is required.");
+ }
+ 
+-/*
+- * ---------------------------------------------------------
+- * GROQ REQUEST WITH KEY FALLBACK
+- * ---------------------------------------------------------
+- */
+-
+-async function callGroq(
+-  request: Parameters<
+-    Groq["chat"]["completions"]["create"]
+-  >[0] & { stream?: false }
+-): Promise<Groq.Chat.Completions.ChatCompletion> {
+-  let lastError: unknown = null;
+-
+-  for (let i = 0; i < groqApiKeys.length; i++) {
+-    const key = groqApiKeys[i];
++const MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
++const limits = readLimits();
+ 
+-    console.log(
+-      `[AI] Trying Groq API key ${i + 1}/${groqApiKeys.length}`
+-    );
+-
+-    try {
+-      const groq = new Groq({
+-        apiKey: key,
+-      });
+-
+-      const response =
+-        await groq.chat.completions.create(request);
++console.log(
++  `[AI] Limits: prompt<=${limits.maxPromptChars} chars, ` +
++    `<=${limits.maxToolIterations} LLM turns, timeout ${limits.requestTimeoutMs}ms`
++);
+ 
+-      console.log(
+-        `[AI] Groq API key ${i + 1} succeeded`
+-      );
++const pool = new KeyPool({ keys: groqApiKeys, log: (message) => console.log(message) });
++const llm = createGroqLlm({ pool, model: MODEL, baseURL: process.env.GROQ_BASE_URL });
+ 
+-      return response;
+-    } catch (error) {
+-      lastError = error;
++async function handleChat(prompt: unknown): Promise<ChatResult> {
++  // Reject bad prompts before spending an MCP session or an LLM call.
++  const validPrompt = validatePrompt(prompt, limits);
+ 
+-      console.error(
+-        `[AI] Groq API key ${i + 1} failed:`,
+-        error instanceof Error
+-          ? error.message
+-          : String(error)
+-      );
++  const controller = new AbortController();
++  const deadlineAt = Date.now() + limits.requestTimeoutMs;
++  const timer = setTimeout(() => controller.abort(deadlineError()), limits.requestTimeoutMs);
++  let connection: Awaited<ReturnType<typeof connectMcp>> | undefined;
+ 
+-      if (i < groqApiKeys.length - 1) {
+-        console.log(
+-          `[AI] Falling back to Groq API key ${i + 2}`
+-        );
+-      }
+-    }
++  try {
++    connection = await connectMcp(MCP_SERVER_URL as string, controller.signal);
++
++    return await runChat({
++      prompt: validPrompt,
++      systemPrompt: SYSTEM_PROMPT,
++      llm,
++      mcp: connection.mcp,
++      limits,
++      context: { signal: controller.signal, deadlineAt },
++      log: (message) => console.log(message),
++    });
++  } catch (error) {
++    // SDKs report an abort as a generic AbortError; the real cause is the deadline.
++    if (controller.signal.aborted) throw deadlineError();
++    throw error;
++  } finally {
++    clearTimeout(timer);
++    await connection?.close();
+   }
+-
+-  throw lastError instanceof Error
+-    ? lastError
+-    : new Error("All Groq API keys failed.");
+ }
+ 
+-/*
+- * ---------------------------------------------------------
+- * MCP CLIENT
+- * ---------------------------------------------------------
+- */
+-
+-async function createMCPClient() {
+-  const url = new URL(MCP_SERVER_URL);
+-
+-  const transport =
+-    new StreamableHTTPClientTransport(url);
+-
+-  const client = new Client({
+-    name: "map-renderer-ai-server",
+-    version: "1.0.0",
+-  });
+-
+-  await client.connect(transport as never);
+-
+-  return client;
++interface ChatRequest {
++  prompt?: unknown;
+ }
+ 
+-/*
+- * ---------------------------------------------------------
+- * MCP TOOL → GROQ TOOL
+- * ---------------------------------------------------------
+- */
+-
+-function mcpToolToGroqTool(tool: {
+-  name: string;
+-  description?: string;
+-  inputSchema?: object;
+-}): Record<string, unknown> {
+-  return {
+-    type: "function",
+-    function: {
+-      name: tool.name,
+-      description: tool.description ?? "",
+-      parameters: tool.inputSchema ?? {
+-        type: "object",
+-        properties: {},
+-      },
+-    },
+-  };
++function sendJson(res: import("node:http").ServerResponse, status: number, body: unknown): void {
++  res.writeHead(status, { "Content-Type": "application/json" });
++  res.end(JSON.stringify(body));
+ }
+ 
+-/*
+- * ---------------------------------------------------------
+- * CHAT HANDLER
+- * ---------------------------------------------------------
+- */
+-
+-async function handleChat(
+-  prompt: string
+-): Promise<ChatResponse> {
+-  const mcpClient = await createMCPClient();
+-
+-  try {
+-    const { tools } =
+-      await mcpClient.listTools();
+-
+-    const groqTools = tools.map((tool) =>
+-      mcpToolToGroqTool(tool as never)
+-    );
+-
+-    /*
+-     * -----------------------------------------------------
+-     * SYSTEM PROMPT
+-     * -----------------------------------------------------
+-     *
+-     * Keep the map behavior/rules here.
+-     */
+-
+-    const messages: Array<Record<string, unknown>> = [
+-      {
+-        role: "system",
+-        content:
+-          "You are an intelligent map assistant. Use the provided MCP tools to build a clear, attractive, and informative map scene.\n" +
+-
+-          "\nCORE RULES:\n" +
+-          "1. Follow the user's request exactly. Do not add unrelated places, routes, boundaries, or map objects.\n" +
+-          "2. Use the appropriate MCP tool for every geographic feature requested by the user.\n" +
+-          "3. Whenever you intentionally draw or display a geographic feature, give it one meaningful label using createLabel whenever a suitable label can reasonably be placed.\n" +
+-          "4. A place represented by createMarker should normally have one label containing that place's actual name.\n" +
+-          "5. A region represented by createPolygon should normally have one label containing that region's actual name.\n" +
+-          "6. For a path or route, clearly label its relevant endpoint places. Do not create a meaningless label for the path itself unless the user requests one.\n" +
+-          "7. Never create duplicate labels for the same geographic feature.\n" +
+-          "8. Label text must describe the actual geographic feature. Never use placeholder, random, malformed, or meaningless text such as 'label', 'labels', 'labekls', 'text', etc.\n" +
+-          "9. Keep label text concise and useful. Prefer the actual place or region name unless the user explicitly requests different text.\n" +
+-          "10. Complete each requested operation ONCE. Before calling a tool, check whether that exact feature has already been created. Never repeat an identical tool call.Dont at all repeat same tool call , just dont do it\n" +
+-
+-          "\nTOOL RULES:\n" +
+-          "11. Use createMarker with a 'location' parameter for places that should be represented as point markers.\n" +
+-          "12. Use createPath with 'start' and 'end' locations when the user requests a connection, route, or path between locations.\n" +
+-          "13. Use createPolygon with a 'location' when the user requests a region, boundary, area, or territory to be highlighted.\n" +
+-          "14. Use createLabel with 'location' and 'text' for labels.\n" +
+-          "15. Complete all required map construction operations before calling renderScene.\n" +
+-          "16. renderScene must be the final map operation. Once renderScene is called, the scene is finalized and you must not request any more tools.\n" +
+-
+-          "\nSTYLING RULES:\n" +
+-          "17. Make the map visually attractive, readable, and professional.\n" +
+-          "18. Use sensible styling by default even when the user does not explicitly specify styling.\n" +
+-          "19. Use visually distinct but harmonious styling for markers, paths, polygons, and labels.\n" +
+-          "20. Prefer subtle, restrained styling over oversized or visually dominant objects.\n" +
+-          "21. MARKER SIZE: Keep markers small and unobtrusive by default. Do NOT use large marker sizes even if the user explicitly asks for a large/prominent marker.\n" +
+-          "22. For normal markers, either omit the 'size' option or use a small size. Never use excessively large marker sizes merely to make a location noticeable; use its label and color instead.\n" +
+-          "23. If several markers are displayed, keep their sizes consistent unless the user explicitly asks to emphasize particular locations.\n" +
+-          "24. PATH WIDTH: Keep paths reasonably thin and readable. Do not make paths excessively thick unless the user explicitly requests emphasis.\n" +
+-          "25. POLYGONS: Prefer moderate fill opacity so that the underlying map remains visible. Avoid overly opaque fills that hide map details.\n" +
+-          "26. LABELS: Keep labels compact and readable. Do not use unnecessarily large font sizes or heavy styling.\n" +
+-          "27. Use appropriate colors, widths, opacity, and dash styles for the type of geographic feature being displayed.\n" +
+-          "28. If the user explicitly requests a color, size, width, opacity, dashed/solid path, or other style, always respect the requested style.\n" +
+-          "29. Keep related objects visually consistent. Avoid excessive or random colors.\n" +
+-          "30. Labels must remain readable against the map and should use appropriate font size, weight, color, and background styling when supported.\n" +
+-
+-          "\nIMPORTANT BEHAVIOR:\n" +
+-          "31. Do not infer unrelated geographic relationships. For example, if the user asks to mark Shamli, do not create a Delhi path or Uttar Pradesh polygon unless requested.\n" +
+-          "32. Do not create duplicate markers or duplicate labels unnecessarily.\n" +
+-          "33. If multiple tools are needed, execute all required tools before renderScene.\n" +
+-          "34. Always provide valid JSON arguments matching the exact tool schemas returned by tools/list.\n" +
+-          "35. Never output fake tool calls as text. Use the actual provided tools.\n" +
+-          "36. Prioritize geographic correctness and visual clarity over adding more objects or more styling.\n",
+-      },
+-      {
+-        role: "user",
+-        content: prompt,
+-      },
+-    ];
+-
+-    let finalContent = "";
+-    let serializedScene: object | null = null;
+-
+-    /*
+-     * -----------------------------------------------------
+-     * TOOL LOOP
+-     * -----------------------------------------------------
+-     *
+-     * IMPORTANT:
+-     * 50 is the defensive maximum.
+-     * There is NO 5-iteration limit.
+-     */
+-
+-    const MAX_TOOL_ITERATIONS = 50;
+-    let iteration = 0;
+-
+-    while (
+-      iteration < MAX_TOOL_ITERATIONS
+-    ) {
+-      iteration++;
+-
+-      const response = await callGroq({
+-        model: MODEL,
+-        messages: messages as never,
+-        tools: groqTools as never,
+-        max_tokens: 4096,
+-      });
+-
+-      const message =
+-        response.choices[0]?.message;
+-
+-      if (!message) {
+-        throw new Error(
+-          "No response from Groq."
+-        );
+-      }
+-
+-      const toolCalls = message.tool_calls;
+-
+-      /*
+-       * Model has finished without requesting
+-       * another tool.
+-       */
+-
+-      if (
+-        !toolCalls ||
+-        toolCalls.length === 0
+-      ) {
+-        finalContent =
+-          message.content ?? "";
+-
+-        break;
+-      }
+-
+-      console.log(
+-        `\n[AI] Tool iteration ${iteration}: ${toolCalls.length} tool call(s)`
+-      );
+-
+-      /*
+-       * Preserve assistant tool-call message.
+-       */
+-
+-      messages.push({
+-        role: "assistant",
+-        content: message.content ?? "",
+-        tool_calls: toolCalls.map(
+-          (call) => ({
+-            id: call.id,
+-            type: "function",
+-            function: {
+-              name: call.function.name,
+-              arguments:
+-                call.function.arguments,
+-            },
+-          })
+-        ),
+-      });
+-
+-      /*
+-       * Execute MCP tool calls.
+-       */
+-
+-      for (const toolCall of toolCalls) {
+-        const toolName =
+-          toolCall.function.name;
+-
+-        console.log(
+-          `[AI] Calling MCP tool: ${toolName}`
+-        );
+-
+-        console.log(
+-          `[AI] Arguments: ${toolCall.function.arguments}`
+-        );
+-
+-        try {
+-          const args = JSON.parse(
+-            toolCall.function.arguments ||
+-              "{}"
+-          );
+-
+-          const result =
+-            await mcpClient.callTool({
+-              name: toolName,
+-              arguments: args,
+-            });
+-
+-          /*
+-           * Extract complete MCP result.
+-           */
++const httpServer = createHttpServer(async (req, res) => {
++  res.setHeader("Access-Control-Allow-Origin", "*");
++  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
++  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+ 
+-          const content =
+-            (result.content ?? []) as Array<{
+-              type?: string;
+-              text?: string;
+-            }>;
+-
+-          const fullToolResult =
+-            content
+-              .map((block) => {
+-                if (
+-                  block.type === "text" &&
+-                  block.text
+-                ) {
+-                  return block.text;
+-                }
+-
+-                return "";
+-              })
+-              .join(" ");
+-
+-          console.log(
+-            `[AI] MCP tool completed: ${toolName}`
+-          );
+-
+-          /*
+-           * -------------------------------------------------
+-           * renderScene IS TERMINAL
+-           * -------------------------------------------------
+-           *
+-           * Capture the complete scene locally.
+-           *
+-           * DO NOT send the complete scene JSON
+-           * back to Groq.
+-           */
+-
+-          if (
+-            toolName ===
+-            "renderScene"
+-          ) {
+-            try {
+-              const parsed =
+-                JSON.parse(
+-                  fullToolResult
+-                );
+-
+-              if (
+-                parsed &&
+-                typeof parsed ===
+-                  "object" &&
+-                Array.isArray(
+-                  parsed.objects
+-                )
+-              ) {
+-                serializedScene =
+-                  parsed;
+-
+-                console.log(
+-                  `[AI] Scene captured successfully: ${parsed.objects.length} object(s)`
+-                );
+-
+-                /*
+-                 * renderScene is final.
+-                 * Do not make another Groq request.
+-                 */
+-
+-                const scene = serializedScene;
+-
+-                if (!scene) {
+-                  throw new Error(
+-                    "Scene was not captured."
+-                  );
+-                }
+-
+-                return {
+-                  scene,
+-                  message:
+-                    finalContent ||
+-                    "Scene rendered.",
+-                };
+-              }
+-
+-              throw new Error(
+-                "renderScene returned an invalid scene structure."
+-              );
+-            } catch (error) {
+-              console.error(
+-                "[AI] Failed to parse renderScene result:",
+-                error
+-              );
+-
+-              throw new Error(
+-                "Failed to parse the scene returned by renderScene."
+-              );
+-            }
+-          }
+-
+-          /*
+-           * Normal tool results are sent back
+-           * to Groq so the model can decide what
+-           * to do next.
+-           *
+-           * There is no arbitrary 500-character
+-           * truncation here.
+-           */
+-
+-          messages.push({
+-            role: "tool",
+-            tool_call_id:
+-              toolCall.id,
+-            content:
+-              fullToolResult,
+-          });
+-        } catch (error) {
+-          const errorMessage =
+-            `Error: ${
+-              error instanceof Error
+-                ? error.message
+-                : String(error)
+-            }`;
+-
+-          console.error(
+-            `[AI] MCP tool failed: ${toolName}`,
+-            error
+-          );
+-
+-          /*
+-           * Tell Groq about the tool failure
+-           * so it can potentially recover.
+-           */
+-
+-          messages.push({
+-            role: "tool",
+-            tool_call_id:
+-              toolCall.id,
+-            content:
+-              errorMessage,
+-          });
+-        }
+-      }
+-    }
+-
+-    /*
+-     * -----------------------------------------------------
+-     * DEFENSIVE RENDER FALLBACK
+-     * -----------------------------------------------------
+-     *
+-     * If the model stops without calling renderScene,
+-     * finalize the current MCP scene ourselves.
+-     */
+-
+-    if (!serializedScene) {
+-      console.log(
+-        "[AI] Model finished without renderScene. Calling renderScene explicitly."
+-      );
+-
+-      const result =
+-        await mcpClient.callTool({
+-          name: "renderScene",
+-          arguments: {},
+-        });
+-
+-      const content =
+-        (result.content ?? []) as Array<{
+-          type?: string;
+-          text?: string;
+-        }>;
++  if (req.method === "OPTIONS") {
++    res.writeHead(204);
++    res.end();
++    return;
++  }
+ 
+-      const renderResult =
+-        content
+-          .map((block) => {
+-            if (
+-              block.type === "text" &&
+-              block.text
+-            ) {
+-              return block.text;
+-            }
++  if (req.method === "GET" && req.url === "/health") {
++    sendJson(res, 200, { status: "ok" });
++    return;
++  }
+ 
+-            return "";
+-          })
+-          .join(" ");
++  if (req.method === "POST" && req.url === "/api/chat") {
++    try {
++      const chunks: Buffer[] = [];
++      for await (const chunk of req) chunks.push(chunk as Buffer);
+ 
++      let body: ChatRequest;
+       try {
+-        const parsed =
+-          JSON.parse(renderResult);
+-
+-        if (
+-          parsed &&
+-          typeof parsed ===
+-            "object" &&
+-          Array.isArray(
+-            parsed.objects
+-          )
+-        ) {
+-          serializedScene =
+-            parsed;
+-
+-          console.log(
+-            `[AI] Explicit renderScene succeeded: ${parsed.objects.length} object(s)`
+-          );
+-        }
+-      } catch (error) {
+-        console.error(
+-          "[AI] Failed to parse explicit renderScene result:",
+-          error
+-        );
++        body = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as ChatRequest;
++      } catch {
++        throw new ChatError(400, "Request body must be valid JSON.");
+       }
+-    }
+-
+-    /*
+-     * -----------------------------------------------------
+-     * FINAL VALIDATION
+-     * -----------------------------------------------------
+-     */
+ 
+-    if (!serializedScene) {
+-      if (
+-        iteration >=
+-        MAX_TOOL_ITERATIONS
+-      ) {
+-        throw new Error(
+-          `Tool-calling loop reached the defensive limit of ${MAX_TOOL_ITERATIONS} iterations without producing a scene.`
+-        );
++      sendJson(res, 200, await handleChat(body.prompt));
++    } catch (error) {
++      if (error instanceof ChatError) {
++        console.error(`Chat error (${error.status}): ${error.message}`, error.cause ?? "");
++        sendJson(res, error.status, { error: error.message });
++      } else {
++        console.error("Chat error:", error);
++        sendJson(res, 500, { error: "Failed to process request" });
+       }
+-
+-      throw new Error(
+-        "No scene data found. The MCP scene could not be finalized."
+-      );
+     }
+-
+-    const scene = serializedScene;
+-
+-    return {
+-      scene,
+-      message:
+-        finalContent ||
+-        "Scene rendered.",
+-    };
+-  } finally {
+-    await mcpClient.close();
++    return;
+   }
+-}
+-
+-/*
+- * ---------------------------------------------------------
+- * HTTP SERVER
+- * ---------------------------------------------------------
+- */
+-
+-const httpServer =
+-  createHttpServer(
+-    async (req, res) => {
+-      /*
+-       * CORS
+-       */
+-
+-      res.setHeader(
+-        "Access-Control-Allow-Origin",
+-        "*"
+-      );
+-
+-      res.setHeader(
+-        "Access-Control-Allow-Methods",
+-        "GET, POST, OPTIONS"
+-      );
+-
+-      res.setHeader(
+-        "Access-Control-Allow-Headers",
+-        "Content-Type"
+-      );
+-
+-      if (
+-        req.method === "OPTIONS"
+-      ) {
+-        res.writeHead(204);
+-        res.end();
+-        return;
+-      }
+-
+-      /*
+-       * Health check
+-       */
+-
+-      if (
+-        req.method === "GET" &&
+-        req.url === "/health"
+-      ) {
+-        res.writeHead(200, {
+-          "Content-Type":
+-            "application/json",
+-        });
+-
+-        res.end(
+-          JSON.stringify({
+-            status: "ok",
+-          })
+-        );
+-
+-        return;
+-      }
+-
+-      /*
+-       * Chat endpoint
+-       */
+-
+-      if (
+-        req.method === "POST" &&
+-        req.url === "/api/chat"
+-      ) {
+-        try {
+-          const chunks: Buffer[] = [];
+ 
+-          for await (
+-            const chunk of req
+-          ) {
+-            chunks.push(
+-              chunk as Buffer
+-            );
+-          }
+-
+-          const body =
+-            JSON.parse(
+-              Buffer.concat(
+-                chunks
+-              ).toString("utf-8")
+-            ) as ChatRequest;
+-
+-          if (
+-            !body.prompt ||
+-            typeof body.prompt !==
+-              "string"
+-          ) {
+-            res.writeHead(400, {
+-              "Content-Type":
+-                "application/json",
+-            });
+-
+-            res.end(
+-              JSON.stringify({
+-                error:
+-                  "Missing prompt",
+-              })
+-            );
+-
+-            return;
+-          }
+-
+-          const result =
+-            await handleChat(
+-              body.prompt
+-            );
+-
+-          res.writeHead(200, {
+-            "Content-Type":
+-              "application/json",
+-          });
+-
+-          res.end(
+-            JSON.stringify(result)
+-          );
+-        } catch (error) {
+-          console.error(
+-            "Chat error:",
+-            error
+-          );
+-
+-          res.writeHead(500, {
+-            "Content-Type":
+-              "application/json",
+-          });
+-
+-          res.end(
+-            JSON.stringify({
+-              error:
+-                "Failed to process request",
+-            })
+-          );
+-        }
+-
+-        return;
+-      }
+-
+-      /*
+-       * Unknown route
+-       */
+-
+-      res.writeHead(404, {
+-        "Content-Type":
+-          "application/json",
+-      });
+-
+-      res.end(
+-        JSON.stringify({
+-          error: "Not found",
+-        })
+-      );
+-    }
+-  );
+-
+-const port =
+-  Number(process.env.PORT) || 3002;
++  sendJson(res, 404, { error: "Not found" });
++});
+ 
++const port = Number(process.env.PORT) || 3002;
+ const host = "0.0.0.0";
+ 
+-httpServer.listen(
+-  port,
+-  host,
+-  () => {
+-    console.error(
+-      `AI Server listening on http://${host}:${port}`
+-    );
+-  }
+-);
+\ No newline at end of file
++httpServer.listen(port, host, () => {
++  console.error(`AI Server listening on http://${host}:${port}`);
++});
+diff --git a/packages/ai-server/src/keyPool.ts b/packages/ai-server/src/keyPool.ts
+new file mode 100644
+index 0000000..3393306
+--- /dev/null
++++ b/packages/ai-server/src/keyPool.ts
+@@ -0,0 +1,214 @@
++import { ChatError } from "./errors.js";
++
++/*
++ * Runs an API call against a pool of keys with sensible failure handling:
++ *
++ *   429 (rate limit)    -> put THAT key on cooldown (Retry-After if given) and use the next key.
++ *                          If every key is cooling, wait for the soonest one, but only if
++ *                          that fits inside the request deadline.
++ *   401 / 403           -> the key is bad: disable it for the life of the process.
++ *   5xx / 408 / network -> transient: retry (same key) with exponential backoff + jitter.
++ *   other 4xx (400 ...) -> our request is wrong; no key can fix that, so fail immediately.
++ *   aborted             -> stop at once (the deadline fired).
++ *
++ * The Groq SDK must be created with maxRetries: 0, otherwise it retries by itself
++ * underneath this logic.
++ */
++
++export interface PoolOptions {
++  keys: readonly string[];
++  now?: () => number;
++  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
++  random?: () => number;
++  log?: (message: string) => void;
++  maxAttempts?: number;
++  maxTransientRetries?: number;
++  defaultCooldownMs?: number;
++  maxCooldownMs?: number;
++  backoffBaseMs?: number;
++}
++
++export interface RunContext {
++  signal: AbortSignal;
++  /** Absolute time (same clock as `now`) after which waiting is pointless. */
++  deadlineAt: number;
++}
++
++export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
++  return new Promise((resolve, reject) => {
++    if (signal.aborted) return reject(signal.reason);
++    const timer = setTimeout(() => {
++      signal.removeEventListener("abort", onAbort);
++      resolve();
++    }, ms);
++    const onAbort = (): void => {
++      clearTimeout(timer);
++      reject(signal.reason);
++    };
++    signal.addEventListener("abort", onAbort, { once: true });
++  });
++}
++
++function statusOf(error: unknown): number | undefined {
++  if (typeof error === "object" && error !== null && "status" in error) {
++    const status = (error as { status?: unknown }).status;
++    if (typeof status === "number") return status;
++  }
++  return undefined;
++}
++
++function headerValue(error: unknown, name: string): string | undefined {
++  if (typeof error !== "object" || error === null || !("headers" in error)) return undefined;
++  const headers = (error as { headers?: unknown }).headers;
++  if (!headers || typeof headers !== "object") return undefined;
++  const h = headers as { get?: (n: string) => string | null } & Record<string, unknown>;
++  if (typeof h.get === "function") return h.get(name) ?? undefined;
++  const raw = h[name];
++  return typeof raw === "string" ? raw : undefined;
++}
++
++const DURATION_PART = /(\d+(?:\.\d+)?)(ms|s|m|h)/g;
++const UNIT_MS: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 };
++
++/** How long the provider asks us to wait, in ms, or undefined if it did not say. */
++export function retryAfterMs(error: unknown, now: number): number | undefined {
++  const rawMs = headerValue(error, "retry-after-ms");
++  if (rawMs !== undefined) {
++    const ms = Number(rawMs);
++    if (Number.isFinite(ms) && ms >= 0) return ms;
++  }
++
++  const header = headerValue(error, "retry-after");
++  if (header !== undefined) {
++    const seconds = Number(header);
++    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
++    const date = Date.parse(header);
++    if (Number.isFinite(date)) return Math.max(0, date - now);
++  }
++
++  // Groq puts it in the message: "Please try again in 7.2s" / "in 1m3.4s" / "in 250ms"
++  const message = error instanceof Error ? error.message : "";
++  const match = /try again in ((?:\d+(?:\.\d+)?(?:ms|s|m|h))+)/i.exec(message);
++  if (match?.[1]) {
++    let total = 0;
++    for (const part of match[1].matchAll(DURATION_PART)) {
++      total += Number(part[1]) * (UNIT_MS[part[2] ?? "s"] ?? 1000);
++    }
++    return total;
++  }
++  return undefined;
++}
++
++export class KeyPool {
++  private readonly keys: readonly string[];
++  private readonly cooldownUntil: number[];
++  private readonly disabled: boolean[];
++  private cursor = 0;
++
++  private readonly now: () => number;
++  private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
++  private readonly random: () => number;
++  private readonly log: (message: string) => void;
++  private readonly maxAttempts: number;
++  private readonly maxTransientRetries: number;
++  private readonly defaultCooldownMs: number;
++  private readonly maxCooldownMs: number;
++  private readonly backoffBaseMs: number;
++
++  constructor(options: PoolOptions) {
++    this.keys = options.keys;
++    this.cooldownUntil = options.keys.map(() => 0);
++    this.disabled = options.keys.map(() => false);
++    this.now = options.now ?? Date.now;
++    this.sleep = options.sleep ?? abortableSleep;
++    this.random = options.random ?? Math.random;
++    this.log = options.log ?? (() => undefined);
++    this.maxAttempts = options.maxAttempts ?? 8;
++    this.maxTransientRetries = options.maxTransientRetries ?? 2;
++    this.defaultCooldownMs = options.defaultCooldownMs ?? 5000;
++    this.maxCooldownMs = options.maxCooldownMs ?? 60_000;
++    this.backoffBaseMs = options.backoffBaseMs ?? 500;
++  }
++
++  /** Index of the next usable key (starting at the last good one), or -1. */
++  private pickKey(now: number): number {
++    for (let offset = 0; offset < this.keys.length; offset++) {
++      const i = (this.cursor + offset) % this.keys.length;
++      if (!this.disabled[i] && (this.cooldownUntil[i] ?? 0) <= now) return i;
++    }
++    return -1;
++  }
++
++  public async run<T>(call: (key: string) => Promise<T>, context: RunContext): Promise<T> {
++    const { signal, deadlineAt } = context;
++    let transientRetries = 0;
++
++    for (let attempt = 0; attempt < this.maxAttempts; attempt++) {
++      if (signal.aborted) throw signal.reason;
++
++      const now = this.now();
++      const index = this.pickKey(now);
++
++      if (index === -1) {
++        const waiting = this.cooldownUntil.filter((_, i) => !this.disabled[i]);
++        if (waiting.length === 0) {
++          throw new ChatError(503, "No usable Groq API key is configured.");
++        }
++        const wait = Math.max(0, Math.min(...waiting) - now);
++        if (now + wait >= deadlineAt) {
++          throw new ChatError(503, "The AI provider is rate limited right now. Please try again in a moment.");
++        }
++        this.log(`[AI] All keys rate limited; waiting ${wait}ms`);
++        await this.sleep(wait, signal);
++        continue;
++      }
++
++      const key = this.keys[index] as string;
++      try {
++        const result = await call(key);
++        this.cursor = index;
++        return result;
++      } catch (error) {
++        if (signal.aborted) throw signal.reason;
++        const status = statusOf(error);
++        const label = `key ${index + 1}/${this.keys.length}`;
++
++        if (status === 429) {
++          // Measured from when the error came back, not from before the call.
++          const failedAt = this.now();
++          const asked = retryAfterMs(error, failedAt) ?? this.defaultCooldownMs;
++          const cooldown = Math.min(asked, this.maxCooldownMs);
++          this.cooldownUntil[index] = failedAt + cooldown;
++          this.log(`[AI] Groq ${label} rate limited; cooling down ${cooldown}ms`);
++          continue;
++        }
++
++        if (status === 401 || status === 403) {
++          this.disabled[index] = true;
++          this.log(`[AI] Groq ${label} rejected (HTTP ${status}); disabled`);
++          continue;
++        }
++
++        const transient = status === undefined || status === 408 || status >= 500;
++        if (transient) {
++          if (transientRetries >= this.maxTransientRetries) {
++            throw new ChatError(502, "The AI provider is unavailable. Please try again.", { cause: error });
++          }
++          const backoff = Math.round(this.backoffBaseMs * 2 ** transientRetries * (0.5 + this.random() / 2));
++          transientRetries++;
++          this.log(`[AI] Groq ${label} failed (${status ?? "network"}); retrying in ${backoff}ms`);
++          if (now + backoff >= deadlineAt) {
++            throw new ChatError(502, "The AI provider is unavailable. Please try again.", { cause: error });
++          }
++          await this.sleep(backoff, signal);
++          continue;
++        }
++
++        // 400, 404, 413, 422 ...: retrying or switching keys cannot help.
++        throw new ChatError(502, `The AI provider rejected the request (HTTP ${status}).`, { cause: error });
++      }
++    }
++
++    throw new ChatError(503, "The AI provider could not be reached after several attempts. Please try again.");
++  }
++}
+diff --git a/packages/ai-server/src/mcp.ts b/packages/ai-server/src/mcp.ts
+new file mode 100644
+index 0000000..5defc38
+--- /dev/null
++++ b/packages/ai-server/src/mcp.ts
+@@ -0,0 +1,49 @@
++import { Client } from "@modelcontextprotocol/sdk/client/index.js";
++import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
++import type { McpLike } from "./chatLoop.js";
++
++export interface McpConnection {
++  mcp: McpLike;
++  /** Ends the MCP session on the server, then closes the connection. Never throws. */
++  close(): Promise<void>;
++}
++
++const CLOSE_TIMEOUT_MS = 2000;
++
++export async function connectMcp(url: string, signal: AbortSignal): Promise<McpConnection> {
++  const transport = new StreamableHTTPClientTransport(new URL(url));
++  const client = new Client({ name: "map-renderer-ai-server", version: "1.0.0" });
++
++  try {
++    await client.connect(transport as never, { signal });
++  } catch (error) {
++    await client.close().catch(() => undefined);
++    throw error;
++  }
++
++  const mcp: McpLike = {
++    async listTools(s) {
++      const { tools } = await client.listTools(undefined, { signal: s });
++      return tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
++    },
++    async callTool(name, args, s) {
++      const result = await client.callTool({ name, arguments: args }, undefined, { signal: s });
++      const blocks = (result.content ?? []) as Array<{ type?: string; text?: string }>;
++      const text = blocks.map((b) => (b.type === "text" && b.text ? b.text : "")).join(" ");
++      return { text, isError: result.isError === true };
++    },
++  };
++
++  return {
++    mcp,
++    async close() {
++      // Without terminateSession the server keeps this session until its idle
++      // TTL, and a busy ai-server would hit the server's session cap.
++      const shutdown = (async () => {
++        try { await transport.terminateSession(); } catch { /* best effort */ }
++        try { await client.close(); } catch { /* best effort */ }
++      })();
++      await Promise.race([shutdown, new Promise<void>((r) => setTimeout(r, CLOSE_TIMEOUT_MS).unref())]);
++    },
++  };
++}
+diff --git a/packages/ai-server/src/prompt.ts b/packages/ai-server/src/prompt.ts
+new file mode 100644
+index 0000000..bfcb9de
+--- /dev/null
++++ b/packages/ai-server/src/prompt.ts
+@@ -0,0 +1,46 @@
++/*
++ * Map behaviour rules for the model. Moved verbatim from index.ts.
++ * (Changing this text is an LLM-behaviour change; keep it in its own patch.)
++ */
++export const SYSTEM_PROMPT: string =
++  "You are an intelligent map assistant. Use the provided MCP tools to build a clear, attractive, and informative map scene.\n" +
++  "\nCORE RULES:\n" +
++  "1. Follow the user's request exactly. Do not add unrelated places, routes, boundaries, or map objects.\n" +
++  "2. Use the appropriate MCP tool for every geographic feature requested by the user.\n" +
++  "3. Whenever you intentionally draw or display a geographic feature, give it one meaningful label using createLabel whenever a suitable label can reasonably be placed.\n" +
++  "4. A place represented by createMarker should normally have one label containing that place's actual name.\n" +
++  "5. A region represented by createPolygon should normally have one label containing that region's actual name.\n" +
++  "6. For a path or route, clearly label its relevant endpoint places. Do not create a meaningless label for the path itself unless the user requests one.\n" +
++  "7. Never create duplicate labels for the same geographic feature.\n" +
++  "8. Label text must describe the actual geographic feature. Never use placeholder, random, malformed, or meaningless text such as 'label', 'labels', 'labekls', 'text', etc.\n" +
++  "9. Keep label text concise and useful. Prefer the actual place or region name unless the user explicitly requests different text.\n" +
++  "10. Complete each requested operation ONCE. Before calling a tool, check whether that exact feature has already been created. Never repeat an identical tool call.Dont at all repeat same tool call , just dont do it\n" +
++  "\nTOOL RULES:\n" +
++  "11. Use createMarker with a 'location' parameter for places that should be represented as point markers.\n" +
++  "12. Use createPath with 'start' and 'end' locations when the user requests a connection, route, or path between locations.\n" +
++  "13. Use createPolygon with a 'location' when the user requests a region, boundary, area, or territory to be highlighted.\n" +
++  "14. Use createLabel with 'location' and 'text' for labels.\n" +
++  "15. Complete all required map construction operations before calling renderScene.\n" +
++  "16. renderScene must be the final map operation. Once renderScene is called, the scene is finalized and you must not request any more tools.\n" +
++  "\nSTYLING RULES:\n" +
++  "17. Make the map visually attractive, readable, and professional.\n" +
++  "18. Use sensible styling by default even when the user does not explicitly specify styling.\n" +
++  "19. Use visually distinct but harmonious styling for markers, paths, polygons, and labels.\n" +
++  "20. Prefer subtle, restrained styling over oversized or visually dominant objects.\n" +
++  "21. MARKER SIZE: Keep markers small and unobtrusive by default. Do NOT use large marker sizes even if the user explicitly asks for a large/prominent marker.\n" +
++  "22. For normal markers, either omit the 'size' option or use a small size. Never use excessively large marker sizes merely to make a location noticeable; use its label and color instead.\n" +
++  "23. If several markers are displayed, keep their sizes consistent unless the user explicitly asks to emphasize particular locations.\n" +
++  "24. PATH WIDTH: Keep paths reasonably thin and readable. Do not make paths excessively thick unless the user explicitly requests emphasis.\n" +
++  "25. POLYGONS: Prefer moderate fill opacity so that the underlying map remains visible. Avoid overly opaque fills that hide map details.\n" +
++  "26. LABELS: Keep labels compact and readable. Do not use unnecessarily large font sizes or heavy styling.\n" +
++  "27. Use appropriate colors, widths, opacity, and dash styles for the type of geographic feature being displayed.\n" +
++  "28. If the user explicitly requests a color, size, width, opacity, dashed/solid path, or other style, always respect the requested style.\n" +
++  "29. Keep related objects visually consistent. Avoid excessive or random colors.\n" +
++  "30. Labels must remain readable against the map and should use appropriate font size, weight, color, and background styling when supported.\n" +
++  "\nIMPORTANT BEHAVIOR:\n" +
++  "31. Do not infer unrelated geographic relationships. For example, if the user asks to mark Shamli, do not create a Delhi path or Uttar Pradesh polygon unless requested.\n" +
++  "32. Do not create duplicate markers or duplicate labels unnecessarily.\n" +
++  "33. If multiple tools are needed, execute all required tools before renderScene.\n" +
++  "34. Always provide valid JSON arguments matching the exact tool schemas returned by tools/list.\n" +
++  "35. Never output fake tool calls as text. Use the actual provided tools.\n" +
++  "36. Prioritize geographic correctness and visual clarity over adding more objects or more styling.\n";
+diff --git a/packages/ai-server/test/chatLoop.test.ts b/packages/ai-server/test/chatLoop.test.ts
+new file mode 100644
+index 0000000..d06b981
+--- /dev/null
++++ b/packages/ai-server/test/chatLoop.test.ts
+@@ -0,0 +1,140 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { runChat, summarizeScene, validatePrompt } from "../src/chatLoop.ts";
++import type { Llm, LlmReply, McpLike, ToolCall } from "../src/chatLoop.ts";
++import { ChatError } from "../src/errors.ts";
++
++const limits = { maxPromptChars: 100, maxToolIterations: 5, requestTimeoutMs: 1000 };
++let id = 0;
++const call = (name: string, args: unknown = {}): ToolCall => ({ id: `c${++id}`, name, arguments: typeof args === "string" ? args : JSON.stringify(args) });
++const reply = (content: string | null, ...toolCalls: ToolCall[]): LlmReply => ({ content, toolCalls });
++
++function fakes(replies: LlmReply[], opts: { scene?: unknown; toolText?: (name: string) => string; toolFails?: string[] } = {}) {
++  const executed: string[] = [];
++  const llmMessages: Array<Array<Record<string, unknown>>> = [];
++  const scene = opts.scene ?? { version: 1, objects: [{ type: "marker" }, { type: "label" }] };
++  let turn = 0;
++  const llm: Llm = {
++    async complete(messages) {
++      llmMessages.push(structuredClone(messages));
++      const r = replies[turn++];
++      if (!r) throw new Error("fake LLM ran out of replies");
++      return r;
++    },
++  };
++  const mcp: McpLike = {
++    async listTools() { return [{ name: "createMarker" }]; },
++    async callTool(name) {
++      executed.push(name);
++      if (opts.toolFails?.includes(name)) throw new Error("tool exploded");
++      if (name === "renderScene") return { text: typeof scene === "string" ? scene : JSON.stringify(scene), isError: false };
++      return { text: opts.toolText?.(name) ?? `ok ${name}`, isError: false };
++    },
++  };
++  const controller = new AbortController();
++  const context = { signal: controller.signal, deadlineAt: Date.now() + 1000 };
++  const run = (prompt = "hi", over: Partial<typeof limits> = {}) =>
++    runChat({ prompt, systemPrompt: "sys", llm, mcp, limits: { ...limits, ...over }, context });
++  return { run, executed, llmMessages, controller, llmTurns: () => turn };
++}
++
++test("executes every call in a turn, even after renderScene, and renders once at the end", async () => {
++  const f = fakes([reply(null, call("createMarker"), call("renderScene"), call("createLabel"))]);
++  await f.run();
++  assert.deepEqual(f.executed, ["createMarker", "createLabel", "renderScene"]);
++});
++
++test("a model that never calls renderScene still gets a rendered scene", async () => {
++  const f = fakes([reply(null, call("createMarker")), reply("done")]);
++  const r = await f.run();
++  assert.deepEqual(f.executed, ["createMarker", "renderScene"]);
++  assert.equal(r.message, "done");
++});
++
++test("every tool_call id gets exactly one tool message before the next LLM turn", async () => {
++  const c1 = call("createMarker"), c2 = call("createLabel"), c3 = call("createMarker", "{bad json");
++  const f = fakes([reply(null, c1, c2, c3), reply("end")]);
++  await f.run();
++  const second = f.llmMessages[1]!;
++  const assistant = second.find((m) => m.role === "assistant") as { tool_calls: Array<{ id: string }> };
++  const answered = second.filter((m) => m.role === "tool").map((m) => m.tool_call_id);
++  assert.deepEqual(assistant.tool_calls.map((t) => t.id), [c1.id, c2.id, c3.id]);
++  assert.deepEqual(answered, [c1.id, c2.id, c3.id]);
++});
++
++test("reply is the model's last non-empty text; otherwise a summary of the scene", async () => {
++  const a = await fakes([reply("Marking now.", call("createMarker"), call("renderScene"))]).run();
++  assert.equal(a.message, "Marking now.");
++  const b = await fakes([reply("first", call("createMarker")), reply("   ")]).run();
++  assert.equal(b.message, "first", "blank text does not overwrite");
++  const c = await fakes([reply(null, call("renderScene"))], { scene: { objects: [{ type: "marker" }, { type: "marker" }, { type: "path" }] } }).run();
++  assert.equal(c.message, "Rendered 2 markers and 1 path.");
++});
++
++test("bad tool arguments are reported to the model and the loop carries on", async () => {
++  const f = fakes([reply(null, call("createMarker", "{not json"), call("createMarker", "[1,2]"), call("createMarker", {})), reply("ok")]);
++  const r = await f.run();
++  assert.deepEqual(f.executed, ["createMarker", "renderScene"], "only the valid call reached the server");
++  const toolMsgs = f.llmMessages[1]!.filter((m) => m.role === "tool").map((m) => String(m.content));
++  assert.match(toolMsgs[0]!, /^Error:/);
++  assert.match(toolMsgs[1]!, /must be a JSON object/);
++  assert.equal(r.message, "ok");
++});
++
++test("a tool that throws is reported to the model, not fatal", async () => {
++  const f = fakes([reply(null, call("createPath")), reply("sorry")], { toolFails: ["createPath"] });
++  const r = await f.run();
++  assert.match(String(f.llmMessages[1]!.at(-1)!.content), /tool exploded/);
++  assert.equal(r.message, "sorry");
++});
++
++test("iteration cap: stops asking the model, still renders, and says it may be incomplete", async () => {
++  const endless = Array.from({ length: 10 }, () => reply(null, call("createMarker")));
++  const f = fakes(endless);
++  const r = await f.run("go", { maxToolIterations: 3 });
++  assert.equal(f.llmTurns(), 3);
++  assert.equal(f.executed.at(-1), "renderScene");
++  assert.match(r.message, /may be incomplete/);
++});
++
++test("deadline: aborting stops the loop with the abort reason and never renders", async () => {
++  const f = fakes([reply(null, call("createMarker")), reply(null, call("createMarker"))]);
++  const reason = new ChatError(504, "too slow");
++  f.controller.abort(reason);
++  await assert.rejects(f.run(), (e: unknown) => e === reason);
++  assert.ok(!f.executed.includes("renderScene"));
++});
++
++test("invalid / unreadable / errored scenes from the map server become 502", async () => {
++  for (const scene of ["not json", { nope: 1 }, "[1,2]", "null"]) {
++    await assert.rejects(fakes([reply("x")], { scene }).run(), (e: unknown) => e instanceof ChatError && e.status === 502);
++  }
++  const f = fakes([reply("x")]);
++  const bad: McpLike = { listTools: async () => [], callTool: async () => ({ text: "scene cap exceeded", isError: true }) };
++  await assert.rejects(
++    runChat({ prompt: "p", systemPrompt: "s", llm: { complete: async () => reply("x") }, mcp: bad, limits, context: { signal: f.controller.signal, deadlineAt: Date.now() + 1000 } }),
++    (e: unknown) => e instanceof ChatError && e.status === 502 && /scene cap exceeded/.test(e.message)
++  );
++});
++
++test("validatePrompt", () => {
++  assert.equal(validatePrompt("hello", limits), "hello");
++  for (const bad of [undefined, null, 5, "", "   "]) {
++    assert.throws(() => validatePrompt(bad, limits), (e: unknown) => e instanceof ChatError && e.status === 400);
++  }
++  assert.throws(() => validatePrompt("x".repeat(101), limits), (e: unknown) => e instanceof ChatError && e.status === 400 && /too long/.test(e.message));
++  assert.equal(validatePrompt("x".repeat(100), limits).length, 100);
++});
++
++test("a too-long prompt never reaches the LLM", async () => {
++  const f = fakes([reply("x")]);
++  await assert.rejects(f.run("x".repeat(500)), (e: unknown) => e instanceof ChatError && e.status === 400);
++  assert.equal(f.llmTurns(), 0);
++});
++
++test("summarizeScene wording", () => {
++  assert.equal(summarizeScene([]), "The map is empty.");
++  assert.equal(summarizeScene([{ type: "marker" }]), "Rendered 1 marker.");
++  assert.equal(summarizeScene([{ type: "marker" }, { type: "label" }, { type: "label" }]), "Rendered 1 marker and 2 labels.");
++  assert.equal(summarizeScene([{ type: "marker" }, { type: "path" }, { type: "polygon" }]), "Rendered 1 marker, 1 path and 1 polygon.");
++});
+diff --git a/packages/ai-server/test/e2e-chat.mjs b/packages/ai-server/test/e2e-chat.mjs
+new file mode 100644
+index 0000000..61df794
+--- /dev/null
++++ b/packages/ai-server/test/e2e-chat.mjs
+@@ -0,0 +1,258 @@
++/* eslint-disable */
++// Black-box test of the ai-server tool loop.
++//   fake Groq HTTP server  <--  REAL ai-server (dist/index.js)  -->  REAL MCP server (network stubbed)
++// Works against both the old and the new ai-server, so the same file gives the baseline.
++// Usage (repo root, after building shared, server, ai-server):  node packages/ai-server/test/e2e-chat.mjs
++import { spawn } from "node:child_process";
++import http from "node:http";
++import { fileURLToPath, pathToFileURL } from "node:url";
++import path from "node:path";
++
++const here = path.dirname(fileURLToPath(import.meta.url));
++const MCP_JS = path.resolve(here, "../../server/dist/index.js");
++const STUB = path.resolve(here, "../../server/test/stub-network.mjs");
++const AI_JS = process.env.AI_SERVER_JS ?? path.resolve(here, "../dist/index.js");
++const MCP_PORT = 3941;
++let nextPort = 3951;
++
++const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++const results = [];
++const record = (name, ok, note = "") => {
++  results.push({ name, ok, note });
++  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${note ? "  -- " + note : ""}`);
++};
++async function guard(name, fn) {
++  try { await fn(); } catch (e) { record(`${name} (EXCEPTION)`, false, String(e.stack ?? e).slice(0, 300)); }
++}
++
++/* ------------------------------ processes ------------------------------ */
++
++async function waitHealthy(port, child, getLog) {
++  for (let i = 0; i < 60; i++) {
++    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return; } catch {}
++    if (child.exitCode !== null) break;
++    await sleep(100);
++  }
++  child.kill();
++  throw new Error("process did not start: " + getLog());
++}
++const stop = (child) => new Promise((r) => { if (child.exitCode !== null) return r(); child.once("exit", r); child.kill(); });
++
++async function startMcp() {
++  const child = spawn(process.execPath, ["--import", pathToFileURL(STUB).href, MCP_JS], {
++    env: { ...process.env, PORT: String(MCP_PORT), NOMINATIM_MIN_INTERVAL_MS: "0" },
++    stdio: ["ignore", "ignore", "pipe"],
++  });
++  let log = ""; child.stderr.on("data", (d) => (log += d));
++  await waitHealthy(MCP_PORT, child, () => log);
++  return child;
++}
++
++async function startAi(groqPort, env = {}) {
++  const port = nextPort++;
++  const child = spawn(process.execPath, [AI_JS], {
++    env: {
++      ...process.env, PORT: String(port), MCP_SERVER_URL: `http://127.0.0.1:${MCP_PORT}/mcp`,
++      GROQ_API_KEY_1: "key-A", GROQ_API_KEY_2: "key-B", GROQ_API_KEY_3: "", GROQ_API_KEY_4: "", GROQ_API_KEY_5: "",
++      GROQ_BASE_URL: `http://127.0.0.1:${groqPort}`, ...env,
++    },
++    stdio: ["ignore", "pipe", "pipe"],
++  });
++  let log = ""; child.stdout.on("data", (d) => (log += d)); child.stderr.on("data", (d) => (log += d));
++  await waitHealthy(port, child, () => log);
++  return { child, port, getLog: () => log };
++}
++
++/* ------------------------------- fake Groq ------------------------------- */
++
++let callId = 0;
++const completion = (content, calls = []) => ({
++  id: "cmpl", object: "chat.completion", created: 0, model: "fake",
++  choices: [{
++    index: 0, finish_reason: calls.length ? "tool_calls" : "stop",
++    message: {
++      role: "assistant", content,
++      ...(calls.length ? { tool_calls: calls.map(([name, args]) => ({ id: `call_${++callId}`, type: "function", function: { name, arguments: JSON.stringify(args) } })) } : {}),
++    },
++  }],
++  usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
++});
++
++/** handler({key, n, byKey, body}) -> {status?, headers?, json?, hang?} ; n = 0-based index of this request overall */
++async function startGroq(handler) {
++  const port = nextPort++;
++  const requests = [];
++  const sockets = new Set();
++  const server = http.createServer(async (req, res) => {
++    const chunks = []; for await (const c of req) chunks.push(c);
++    let body = {}; try { body = JSON.parse(Buffer.concat(chunks).toString()); } catch {}
++    const key = (req.headers.authorization ?? "").replace("Bearer ", "");
++    const info = { key, n: requests.length, body };
++    requests.push(info);
++    info.byKey = requests.filter((r) => r.key === key).length - 1;
++    const out = await handler(info);
++    if (out.hang) return; // never answer
++    res.writeHead(out.status ?? 200, { "content-type": "application/json", ...(out.headers ?? {}) });
++    res.end(JSON.stringify(out.json ?? {}));
++  });
++  server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
++  await new Promise((r) => server.listen(port, "127.0.0.1", r));
++  return {
++    port, requests,
++    count: (key) => requests.filter((r) => r.key === key).length,
++    close: () => { for (const s of sockets) s.destroy(); server.close(); },
++  };
++}
++
++const err = (status, message, headers = {}) => ({ status, headers, json: { error: { message, type: "x" } } });
++
++/** One scenario = fresh fake Groq + fresh ai-server; always cleaned up. */
++async function scenario(handler, env, fn) {
++  const groq = await startGroq(handler);
++  let ai;
++  try {
++    ai = await startAi(groq.port, env);
++    await fn({
++      groq, ai,
++      chat: async (prompt, timeoutMs = 20000) => {
++        const t0 = Date.now();
++        try {
++          const r = await fetch(`http://127.0.0.1:${ai.port}/api/chat`, {
++            method: "POST", headers: { "content-type": "application/json" },
++            body: JSON.stringify({ prompt }), signal: AbortSignal.timeout(timeoutMs),
++          });
++          const text = await r.text(); let json = null; try { json = JSON.parse(text); } catch {}
++          return { status: r.status, json, ms: Date.now() - t0 };
++        } catch (e) { return { status: 0, json: null, ms: Date.now() - t0, error: String(e.name) }; }
++      },
++    });
++  } finally { if (ai) await stop(ai.child); groq.close(); }
++}
++const mcpSessions = async () => (await (await fetch(`http://127.0.0.1:${MCP_PORT}/health`)).json()).activeSessions;
++const byType = (scene, t) => (scene?.objects ?? []).filter((o) => o.type === t);
++
++/* -------------------------------- tests -------------------------------- */
++
++async function main() {
++  const mcp = await startMcp();
++  try {
++    await guard("X1", () => scenario(
++      ({ n }) => ({ json: completion(null, [["createMarker", { location: "Delhi" }], ["renderScene", {}], ["createLabel", { location: "Delhi", text: "Capital" }]]) }),
++      {}, async ({ chat }) => {
++        const r = await chat("mark Delhi and label it Capital");
++        const labels = byType(r.json?.scene, "label");
++        record("X1 tool calls AFTER renderScene in the same turn still run", r.status === 200 && labels.length === 1 && labels[0].text === "Capital",
++          `status=${r.status} labels=${JSON.stringify(labels.map((l) => l.text))}`);
++      }));
++
++    await guard("X2", () => scenario(
++      ({ n }) => ({ json: n === 0 ? completion(null, [["createMarker", { location: "Delhi" }]]) : completion("Here is Delhi on the map.") }),
++      {}, async ({ chat }) => {
++        const r = await chat("show Delhi");
++        record("X2 model never calls renderScene: scene still rendered, model text returned (passes on old code too)",
++          r.status === 200 && byType(r.json?.scene, "marker").length === 1 && r.json?.message === "Here is Delhi on the map.", `message=${JSON.stringify(r.json?.message)}`);
++      }));
++
++    await guard("X2b", () => scenario(
++      () => ({ json: completion("Marking Delhi now.", [["createMarker", { location: "Delhi" }], ["renderScene", {}]]) }),
++      {}, async ({ chat }) => {
++        const r = await chat("show Delhi");
++        record("X2b model text in the renderScene turn is kept as the reply", r.status === 200 && r.json?.message === "Marking Delhi now.", `message=${JSON.stringify(r.json?.message)}`);
++      }));
++
++    await guard("X3", () => scenario(
++      () => ({ json: completion(null, [["createMarker", { location: "Delhi" }], ["createMarker", { location: "Mumbai" }], ["createPath", { start: "Delhi", end: "Mumbai" }], ["renderScene", {}]]) }),
++      {}, async ({ chat }) => {
++        const r = await chat("route");
++        const m = r.json?.message ?? "";
++        record("X3 no model text -> reply summarises what was drawn (not the constant 'Scene rendered.')", r.status === 200 && /2 markers/.test(m) && /1 path/.test(m), `message=${JSON.stringify(m)}`);
++      }));
++
++    await guard("X4", () => scenario(
++      ({ key, n }) => key === "key-A" ? err(429, "Rate limit reached. Please try again in 5ms", { "retry-after-ms": "5" })
++        : { json: n < 5 ? completion(null, [["createMarker", { location: "Delhi" }]]) : completion("done") },
++      {}, async ({ chat, groq }) => {
++        const r = await chat("show Delhi");
++        const a = groq.count("key-A"), b = groq.count("key-B");
++        record("X4 a rate-limited key is not retried in a loop: next key is used (key A tried at most once per LLM turn)", r.status === 200 && b >= 1 && a <= b,
++          `status=${r.status} keyA=${a} keyB=${b}`);
++      }));
++
++    await guard("X4b", () => scenario(
++      ({ key, n }) => key === "key-A" ? err(429, "Rate limit reached. Please try again in 3s", { "retry-after-ms": "3000" })
++        : { json: n < 5 ? completion(null, [["createMarker", { location: "Delhi" }]]) : completion("done") },
++      {}, async ({ chat, groq }) => {
++        const r = await chat("show Delhi", 30000);
++        record("X4b Retry-After is honoured: key A gets exactly 1 request, the rest go to key B, and the reply is fast", r.status === 200 && groq.count("key-A") === 1 && r.ms < 3000,
++          `status=${r.status} keyA=${groq.count("key-A")} keyB=${groq.count("key-B")} ms=${r.ms}`);
++      }));
++
++    await guard("X5", () => scenario(
++      ({ key }) => key === "key-A" ? err(400, "bad request") : { json: completion("ok") },
++      {}, async ({ chat, groq }) => {
++        const r = await chat("show Delhi");
++        record("X5 HTTP 400 is not retried on other keys (fails fast)", r.status !== 200 && groq.count("key-B") === 0, `status=${r.status} keyA=${groq.count("key-A")} keyB=${groq.count("key-B")}`);
++      }));
++
++    await guard("X6", () => scenario(
++      ({ n }) => n === 0 ? err(500, "boom") : { json: completion("fine") },
++      { GROQ_API_KEY_2: "" }, async ({ chat, groq }) => {
++        const r = await chat("hi");
++        record("X6 transient 500 is retried and succeeds (passes on old code too: SDK retries)", r.status === 200 && groq.requests.length === 2, `status=${r.status} reqs=${groq.requests.length}`);
++      }));
++
++    await guard("X7", () => scenario(
++      ({ n }) => n < 3 ? err(429, "Rate limit reached. Please try again in 300ms", { "retry-after-ms": "300" }) : { json: completion("recovered") },
++      {}, async ({ chat }) => {
++        const r = await chat("hi");
++        record("X7 all keys rate limited briefly -> waits and recovers (passes on old code too)", r.status === 200 && r.json?.message === "recovered", `status=${r.status}`);
++      }));
++
++    await guard("X8", () => scenario(
++      () => ({ json: completion("ok") }),
++      { MAX_PROMPT_CHARS: "200" }, async ({ chat, groq }) => {
++        const r = await chat("x".repeat(300));
++        record("X8 over-long prompt rejected with 400 before any LLM call", r.status === 400 && groq.requests.length === 0, `status=${r.status} llm calls=${groq.requests.length}`);
++      }));
++
++    await guard("X9", () => {
++      let i = 0;
++      return scenario(
++        () => ({ json: completion(null, [["createMarker", { location: `Place${++i}` }]]) }),
++        { MAX_TOOL_ITERATIONS: "3" }, async ({ chat, groq }) => {
++          const r = await chat("never stops");
++          record("X9 iteration cap: <=3 LLM calls, partial scene still returned with a notice", r.status === 200 && groq.requests.length <= 3 && byType(r.json?.scene, "marker").length === groq.requests.length && /incomplete|stopped/i.test(r.json?.message ?? ""),
++            `status=${r.status} llm calls=${groq.requests.length} markers=${byType(r.json?.scene, "marker").length} message=${JSON.stringify(r.json?.message)}`);
++        });
++    });
++
++    await guard("X10", () => scenario(
++      () => ({ hang: true }),
++      { REQUEST_TIMEOUT_MS: "1500" }, async ({ chat }) => {
++        const r = await chat("hang", 6000);
++        record("X10 overall deadline: hung LLM -> 504 within ~2s", r.status === 504 && r.ms < 4000, `status=${r.status} ms=${r.ms} ${r.error ?? ""}`);
++      }));
++
++    await guard("X11", () => scenario(
++      ({ n }) => ({ json: n === 0 ? completion(null, [["createMarker", { location: "Delhi" }]]) : completion("ok") }),
++      {}, async ({ chat }) => {
++        const before = await mcpSessions();
++        const r = await chat("show Delhi");
++        await sleep(300);
++        const after = await mcpSessions();
++        record("X11 MCP session is closed after each chat (no leaked sessions)", r.status === 200 && after === before, `before=${before} after=${after}`);
++      }));
++
++    await guard("X12", () => scenario(
++      ({ n }) => ({ json: n === 0 ? completion(null, [["createMarker", {}], ["createMarker", { location: "Delhi" }]]) : completion("handled") }),
++      {}, async ({ chat }) => {
++        const r = await chat("bad args first");
++        record("X12 a failing tool call does not abort the chat (passes on old code too)", r.status === 200 && byType(r.json?.scene, "marker").length === 1, `status=${r.status}`);
++      }));
++  } finally { await stop(mcp); }
++
++  const failed = results.filter((r) => !r.ok);
++  console.log(`\n${results.length - failed.length}/${results.length} passed`);
++  process.exit(failed.length ? 1 : 0);
++}
++main().catch((e) => { console.error("HARNESS ERROR", e); process.exit(2); });
+diff --git a/packages/ai-server/test/keyPool.test.ts b/packages/ai-server/test/keyPool.test.ts
+new file mode 100644
+index 0000000..ea9c20b
+--- /dev/null
++++ b/packages/ai-server/test/keyPool.test.ts
+@@ -0,0 +1,172 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { KeyPool, retryAfterMs } from "../src/keyPool.ts";
++import { ChatError } from "../src/errors.ts";
++
++/* fake clock: sleep() advances time instead of waiting */
++function setup(keys: string[], extra: Record<string, unknown> = {}) {
++  const clock = { t: 1_000_000 };
++  const sleeps: number[] = [];
++  const logs: string[] = [];
++  const pool = new KeyPool({
++    keys,
++    now: () => clock.t,
++    sleep: async (ms) => { sleeps.push(ms); clock.t += ms; },
++    random: () => 1,
++    log: (m) => logs.push(m),
++    ...extra,
++  });
++  const ctx = (budgetMs = 60_000) => ({ signal: new AbortController().signal, deadlineAt: clock.t + budgetMs });
++  return { pool, clock, sleeps, logs, ctx };
++}
++const httpError = (status: number | undefined, message = "x", headers: Record<string, string> = {}) =>
++  Object.assign(new Error(message), { status, headers });
++
++test("retryAfterMs: retry-after-ms, seconds, http-date, message formats, none", () => {
++  const now = Date.parse("2026-01-01T00:00:00Z");
++  assert.equal(retryAfterMs(httpError(429, "x", { "retry-after-ms": "250" }), now), 250);
++  assert.equal(retryAfterMs(httpError(429, "x", { "retry-after": "7" }), now), 7000);
++  assert.equal(retryAfterMs(httpError(429, "x", { "retry-after": "Thu, 01 Jan 2026 00:00:30 GMT" }), now), 30_000);
++  assert.equal(retryAfterMs(httpError(429, "Rate limit. Please try again in 7.2s."), now), 7200);
++  assert.equal(retryAfterMs(httpError(429, "Please try again in 1m3.4s"), now), 63_400);
++  assert.equal(retryAfterMs(httpError(429, "Please try again in 250ms"), now), 250);
++  assert.equal(retryAfterMs(httpError(429, "nothing useful"), now), undefined);
++  // Headers object with get()
++  const err = Object.assign(new Error("x"), { status: 429, headers: new Headers({ "retry-after": "2" }) });
++  assert.equal(retryAfterMs(err, now), 2000);
++});
++
++test("success returns result and remembers the good key", async () => {
++  const { pool, ctx } = setup(["a", "b"]);
++  const used: string[] = [];
++  const call = async (k: string) => { used.push(k); if (k === "a") throw httpError(429, "x", { "retry-after-ms": "1000" }); return "ok"; };
++  assert.equal(await pool.run(call, ctx()), "ok");
++  assert.deepEqual(used, ["a", "b"]);
++  used.length = 0;
++  assert.equal(await pool.run(call, ctx()), "ok");
++  assert.deepEqual(used, ["b"], "key a is cooling, b is tried first");
++});
++
++test("429 puts only that key on cooldown, and it comes back after the cooldown", async () => {
++  const { pool, clock, ctx } = setup(["a", "b"]);
++  const used: string[] = [];
++  let aLimited = true;
++  const call = async (k: string) => { used.push(k); if (k === "a" && aLimited) throw httpError(429, "x", { "retry-after-ms": "5000" }); return k; };
++  await pool.run(call, ctx());            // a 429 -> b
++  clock.t += 4000;
++  used.length = 0; await pool.run(call, ctx());
++  assert.deepEqual(used, ["b"], "still cooling at +4s");
++  clock.t += 2000; aLimited = false;
++  // cursor sits on b (last good) so b still serves; make b fail to force a
++  used.length = 0;
++  await pool.run(async (k) => { used.push(k); if (k === "b") throw httpError(429, "x", { "retry-after-ms": "100000" }); return k; }, ctx());
++  assert.deepEqual(used, ["b", "a"], "a is usable again after its cooldown");
++});
++
++test("all keys cooling: waits for the soonest one, then succeeds", async () => {
++  const { pool, sleeps, ctx } = setup(["a", "b"]);
++  let calls = 0;
++  const result = await pool.run(async () => {
++    calls++;
++    if (calls === 1) throw httpError(429, "x", { "retry-after-ms": "3000" });
++    if (calls === 2) throw httpError(429, "x", { "retry-after-ms": "1000" });
++    return "ok";
++  }, ctx());
++  assert.equal(result, "ok");
++  assert.deepEqual(sleeps, [1000], "waited for b (the soonest), not a");
++});
++
++test("all keys cooling and the wait does not fit the deadline: fails at once with 503, no sleep", async () => {
++  const { pool, sleeps, ctx } = setup(["a"]);
++  await assert.rejects(
++    pool.run(async () => { throw httpError(429, "x", { "retry-after-ms": "30000" }); }, ctx(5000)),
++    (e: unknown) => e instanceof ChatError && e.status === 503 && /rate limited/.test(e.message)
++  );
++  assert.deepEqual(sleeps, []);
++});
++
++test("cooldown is capped (maxCooldownMs) and defaults when no hint is given", async () => {
++  const { pool, sleeps, ctx } = setup(["a"], { maxCooldownMs: 2000, defaultCooldownMs: 700 });
++  let n = 0;
++  await pool.run(async () => { if (++n === 1) throw httpError(429, "no hint"); return "ok"; }, ctx());
++  assert.deepEqual(sleeps, [700]);
++  n = 0; sleeps.length = 0;
++  await pool.run(async () => { if (++n === 1) throw httpError(429, "x", { "retry-after": "999" }); return "ok"; }, ctx());
++  assert.deepEqual(sleeps, [2000]);
++});
++
++test("401/403 disable the key for good; all disabled -> 503", async () => {
++  const { pool, ctx } = setup(["a", "b"]);
++  const used: string[] = [];
++  const call = async (k: string) => { used.push(k); if (k === "a") throw httpError(401); return "ok"; };
++  await pool.run(call, ctx());
++  used.length = 0; await pool.run(call, ctx());
++  assert.deepEqual(used, ["b"], "a is never tried again");
++
++  const bad = setup(["a", "b"]);
++  await assert.rejects(
++    bad.pool.run(async () => { throw httpError(403); }, bad.ctx()),
++    (e: unknown) => e instanceof ChatError && e.status === 503 && /No usable/.test(e.message)
++  );
++});
++
++test("400-class errors are not retried and do not rotate keys", async () => {
++  for (const status of [400, 404, 413, 422]) {
++    const { pool, ctx } = setup(["a", "b"]);
++    let calls = 0;
++    await assert.rejects(
++      pool.run(async () => { calls++; throw httpError(status); }, ctx()),
++      (e: unknown) => e instanceof ChatError && e.status === 502 && e.message.includes(String(status))
++    );
++    assert.equal(calls, 1, `status ${status}`);
++  }
++});
++
++test("transient errors (5xx, 408, network) back off exponentially, then give up with 502", async () => {
++  for (const status of [500, 503, 408, undefined]) {
++    const { pool, sleeps, ctx } = setup(["a"], { backoffBaseMs: 100 });
++    let calls = 0;
++    await assert.rejects(
++      pool.run(async () => { calls++; throw httpError(status); }, ctx()),
++      (e: unknown) => e instanceof ChatError && e.status === 502
++    );
++    assert.equal(calls, 3, `1 try + 2 retries (status ${status})`);
++    assert.deepEqual(sleeps, [100, 200]);
++  }
++});
++
++test("transient error then success", async () => {
++  const { pool, ctx } = setup(["a"]);
++  let calls = 0;
++  assert.equal(await pool.run(async () => { if (++calls === 1) throw httpError(500); return "ok"; }, ctx()), "ok");
++});
++
++test("an aborted request stops immediately and surfaces the abort reason", async () => {
++  const { pool } = setup(["a"]);
++  const controller = new AbortController();
++  const reason = new ChatError(504, "deadline");
++  controller.abort(reason);
++  let calls = 0;
++  await assert.rejects(
++    pool.run(async () => { calls++; return "x"; }, { signal: controller.signal, deadlineAt: Date.now() + 1000 }),
++    (e: unknown) => e === reason
++  );
++  assert.equal(calls, 0);
++
++  // abort during a call: the SDK's AbortError is replaced by the reason
++  const c2 = new AbortController();
++  await assert.rejects(
++    pool.run(async () => { c2.abort(reason); throw Object.assign(new Error("aborted"), { name: "AbortError" }); }, { signal: c2.signal, deadlineAt: Date.now() + 1000 }),
++    (e: unknown) => e === reason
++  );
++});
++
++test("maxAttempts bounds the work", async () => {
++  const { pool, ctx } = setup(["a", "b"], { maxAttempts: 4, defaultCooldownMs: 1 });
++  let calls = 0;
++  await assert.rejects(
++    pool.run(async () => { calls++; throw httpError(429); }, ctx()),
++    (e: unknown) => e instanceof ChatError && e.status === 503
++  );
++  assert.ok(calls <= 4);
++});
