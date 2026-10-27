@@ -1,12 +1,5 @@
-import {
-  Animation,
-  Label,
-  LineString,
-  Metadata,
-  Point,
-  PolygonGeometry,
-  Style,
-} from "@map-renderer/shared";
+import { MAX_SCENE_WIRE_OBJECTS, isValidColor } from "@map-renderer/shared";
+import type { LabelObject, LngLat, MarkerObject, PathObject, PolygonObject } from "@map-renderer/shared";
 import type { RequestContext } from "./RequestContext.js";
 
 /*
@@ -24,34 +17,24 @@ const envInt = (name: string, fallback: number): number => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-export const MAX_SCENE_OBJECTS = envInt("MAX_SCENE_OBJECTS", 100);
+// Never allow more than the wire format accepts, whatever the env says.
+export const MAX_SCENE_OBJECTS = Math.min(envInt("MAX_SCENE_OBJECTS", 100), MAX_SCENE_WIRE_OBJECTS);
 const MAX_LABEL_LENGTH = 80;
+const MAX_NAME_LENGTH = 300;
+const name = (value: string): string => value.slice(0, MAX_NAME_LENGTH);
 
 /* ----------------------------- sanitising ------------------------------ */
 
-const NAMED_COLORS = new Set([
-  "black", "white", "red", "green", "blue", "yellow", "orange", "purple",
-  "pink", "brown", "gray", "grey", "cyan", "magenta", "teal", "navy",
-  "maroon", "olive", "lime", "aqua", "silver", "gold", "indigo", "violet",
-  "crimson", "coral", "salmon", "turquoise", "darkgreen", "darkblue",
-  "darkred", "lightblue", "lightgreen", "transparent",
-]);
-
-const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
-const FUNC_COLOR = /^(?:rgb|rgba|hsl|hsla)\([0-9.,%\s/-]+\)$/i;
-
 function color(value: string | undefined, fallback: string, name: string, notes: string[]): string {
   if (value === undefined) return fallback;
-  const v = value.trim();
-  if (HEX_COLOR.test(v) || FUNC_COLOR.test(v) || NAMED_COLORS.has(v.toLowerCase())) return v;
+  if (isValidColor(value)) return value.trim();
   notes.push(`${name} "${value}" is not a valid color, used ${fallback}`);
   return fallback;
 }
 
 function optionalColor(value: string | undefined, name: string, notes: string[]): string | undefined {
   if (value === undefined) return undefined;
-  const v = value.trim();
-  if (HEX_COLOR.test(v) || FUNC_COLOR.test(v) || NAMED_COLORS.has(v.toLowerCase())) return v;
+  if (isValidColor(value)) return value.trim();
   notes.push(`${name} "${value}" is not a valid color, ignored`);
   return undefined;
 }
@@ -87,17 +70,18 @@ function fontWeight(value: string | undefined, notes: string[]): string | undefi
 
 /* ------------------------------- helpers ------------------------------- */
 
-const coordKey = (p: Point): string => `${p.latitude.toFixed(4)},${p.longitude.toFixed(4)}`;
-const markerKey = (p: Point): string => `marker:${coordKey(p)}`;
-const labelKey = (p: Point): string => `label:${coordKey(p)}`;
-const pathKey = (a: Point, b: Point): string => `path:${coordKey(a)}->${coordKey(b)}`;
-const polygonKey = (g: PolygonGeometry): string => {
-  const first = g.points[0];
-  return `polygon:${first ? coordKey(first) : "none"}:${g.points.length}`;
+const coordKey = (p: LngLat): string => `${p[1].toFixed(4)},${p[0].toFixed(4)}`;
+const markerKey = (p: LngLat): string => `marker:${coordKey(p)}`;
+const labelKey = (p: LngLat): string => `label:${coordKey(p)}`;
+const pathKey = (a: LngLat, b: LngLat): string => `path:${coordKey(a)}->${coordKey(b)}`;
+const polygonKey = (polygons: LngLat[][][]): string => {
+  const ring = polygons[0]?.[0];
+  const first = ring?.[0];
+  return `polygon:${first ? coordKey(first) : "none"}:${ring?.length ?? 0}`;
 };
 
 function assertCapacity(ctx: RequestContext, adding: number): void {
-  const current = ctx.scene.getObjects().length;
+  const current = ctx.count();
   if (current + adding > MAX_SCENE_OBJECTS) {
     throw new Error(
       `Scene limit reached (${MAX_SCENE_OBJECTS} objects). Nothing was added. Call renderScene now.`
@@ -107,7 +91,7 @@ function assertCapacity(ctx: RequestContext, adding: number): void {
 
 function summary(ctx: RequestContext, parts: string[], notes: string[]): string {
   const adjusted = notes.length > 0 ? ` Adjusted: ${notes.join("; ")}.` : "";
-  return `${parts.join(" ")}${adjusted} Scene now has ${ctx.scene.getObjects().length} object(s).`;
+  return `${parts.join(" ")}${adjusted} Scene now has ${ctx.count()} object(s).`;
 }
 
 /* -------------------------------- labels ------------------------------- */
@@ -125,13 +109,13 @@ type LabelPlan =
   | { action: "replace"; key: string; existingId: string }
   | { action: "keep"; key: string };
 
-function planLabel(ctx: RequestContext, point: Point, text: string, explicit: boolean): LabelPlan {
+function planLabel(ctx: RequestContext, point: LngLat, text: string, explicit: boolean): LabelPlan {
   const key = labelKey(point);
   const existingId = ctx.keys.get(key);
   if (!existingId) return { action: "create", key };
 
-  const existing = ctx.scene.getObjectById(existingId);
-  const sameText = existing instanceof Label && existing.text === text;
+  const existing = ctx.get(existingId);
+  const sameText = existing?.type === "label" && existing.text === text;
   // Auto labels never overwrite anything; explicit text overrides unless identical.
   if (!explicit || sameText) return { action: "keep", key };
   return { action: "replace", key, existingId };
@@ -140,42 +124,36 @@ function planLabel(ctx: RequestContext, point: Point, text: string, explicit: bo
 function applyLabel(
   ctx: RequestContext,
   plan: LabelPlan,
-  point: Point,
+  point: LngLat,
   location: string,
   text: string,
   style: LabelStyleInput | undefined,
   notes: string[]
 ): void {
   if (plan.action === "keep") return;
-  if (plan.action === "replace") ctx.scene.removeObject(plan.existingId);
+  if (plan.action === "replace") ctx.remove(plan.existingId);
 
-  const labelStyle = new Style(
-    color(style?.color, "#000000", "label color", notes),
-    style?.opacity ?? 1,
-    1,
-    {
-      fontSize: clamp(style?.fontSize, 8, 32, "fontSize", notes),
-      fontWeight: fontWeight(style?.fontWeight, notes),
-      backgroundColor: optionalColor(style?.backgroundColor, "backgroundColor", notes),
-    }
-  );
-
-  const label = ctx.sceneBuilder.createLabel(
-    crypto.randomUUID(),
-    true,
-    labelStyle,
-    new Metadata(location, ""),
-    new Animation(false, 0),
-    point,
-    text
-  );
+  const label: LabelObject = {
+    type: "label",
+    id: crypto.randomUUID(),
+    name: name(location),
+    position: point,
+    text,
+    color: color(style?.color, "#000000", "label color", notes),
+    opacity: clamp(style?.opacity, 0, 1, "opacity", notes) ?? 1,
+    fontSize: clamp(style?.fontSize, 8, 32, "fontSize", notes) ?? 14,
+    fontWeight: fontWeight(style?.fontWeight, notes) ?? "normal",
+  };
+  const background = optionalColor(style?.backgroundColor, "backgroundColor", notes);
+  if (background !== undefined) label.backgroundColor = background;
+  ctx.add(label);
   ctx.keys.set(plan.key, label.id);
 }
 
 export function addLabel(
   ctx: RequestContext,
   location: string,
-  point: Point,
+  point: LngLat,
   text: string,
   style?: LabelStyleInput
 ): string {
@@ -201,7 +179,7 @@ export interface MarkerInput {
   showLabel?: boolean | undefined;
 }
 
-export function addMarker(ctx: RequestContext, location: string, point: Point, input: MarkerInput): string {
+export function addMarker(ctx: RequestContext, location: string, point: LngLat, input: MarkerInput): string {
   const notes: string[] = [];
   const key = markerKey(point);
   const markerExists = ctx.keys.has(key);
@@ -221,19 +199,16 @@ export function addMarker(ctx: RequestContext, location: string, point: Point, i
   if (markerExists) {
     parts.push(`Marker for "${location}" already exists; not duplicated.`);
   } else {
-    const marker = ctx.sceneBuilder.createMarker(
-      crypto.randomUUID(),
-      true,
-      new Style(
-        color(input.style?.color, "#ff0000", "marker color", notes),
-        input.style?.opacity ?? 1,
-        2,
-        { size: clamp(input.style?.size, 0.4, 1.5, "size", notes) }
-      ),
-      new Metadata(location, ""),
-      new Animation(false, 0),
-      point
-    );
+    const marker: MarkerObject = {
+      type: "marker",
+      id: crypto.randomUUID(),
+      name: name(location),
+      position: point,
+      color: color(input.style?.color, "#ff0000", "marker color", notes),
+      opacity: clamp(input.style?.opacity, 0, 1, "opacity", notes) ?? 1,
+      size: clamp(input.style?.size, 0.4, 1.5, "size", notes) ?? 1,
+    };
+    ctx.add(marker);
     ctx.keys.set(key, marker.id);
     parts.push(`Created marker "${location}".`);
   }
@@ -248,7 +223,7 @@ export function addMarker(ctx: RequestContext, location: string, point: Point, i
 
 /* -------------------------------- paths -------------------------------- */
 
-export function hasPath(ctx: RequestContext, start: Point, end: Point): boolean {
+export function hasPath(ctx: RequestContext, start: LngLat, end: LngLat): boolean {
   return ctx.keys.has(pathKey(start, end));
 }
 
@@ -263,9 +238,9 @@ export function addPath(
   ctx: RequestContext,
   startName: string,
   endName: string,
-  start: Point,
-  end: Point,
-  line: LineString | null,
+  start: LngLat,
+  end: LngLat,
+  line: LngLat[] | null,
   style?: PathInput
 ): string {
   const notes: string[] = [];
@@ -276,19 +251,17 @@ export function addPath(
   if (line === null) throw new Error("Internal error: route missing for a new path.");
   assertCapacity(ctx, 1);
 
-  const path = ctx.sceneBuilder.createPath(
-    crypto.randomUUID(),
-    true,
-    new Style(
-      color(style?.color, "#0066ff", "path color", notes),
-      style?.opacity ?? 1,
-      clamp(style?.width, 1, 8, "width", notes) ?? 4,
-      { dash: style?.dash }
-    ),
-    new Metadata(`${startName} → ${endName}`, ""),
-    new Animation(false, 0),
-    line
-  );
+  const path: PathObject = {
+    type: "path",
+    id: crypto.randomUUID(),
+    name: name(`${startName} → ${endName}`),
+    coordinates: line,
+    color: color(style?.color, "#0066ff", "path color", notes),
+    opacity: clamp(style?.opacity, 0, 1, "opacity", notes) ?? 1,
+    width: clamp(style?.width, 1, 8, "width", notes) ?? 4,
+    dash: style?.dash ?? false,
+  };
+  ctx.add(path);
   ctx.keys.set(key, path.id);
   return summary(ctx, [`Created path ${startName} → ${endName}.`], notes);
 }
@@ -306,34 +279,38 @@ export interface PolygonInput {
 export function addPolygon(
   ctx: RequestContext,
   location: string,
-  geometry: PolygonGeometry,
+  polygons: LngLat[][][],
   style?: PolygonInput
 ): string {
   const notes: string[] = [];
-  const key = polygonKey(geometry);
+  const key = polygonKey(polygons);
   if (ctx.keys.has(key)) {
     return summary(ctx, [`Polygon for "${location}" already exists; not duplicated.`], notes);
   }
   assertCapacity(ctx, 1);
 
   const fillColor = color(style?.fillColor, "#00aa00", "fillColor", notes);
-  const fillOpacity = clamp(style?.fillOpacity, 0, 1, "fillOpacity", notes);
+  const fillOpacity = clamp(style?.fillOpacity, 0, 1, "fillOpacity", notes) ?? 0.4;
+  const borderColor = optionalColor(style?.borderColor, "borderColor", notes);
   const borderWidth = clamp(style?.borderWidth, 0, 10, "borderWidth", notes);
 
-  const polygon = ctx.sceneBuilder.createPolygon(
-    crypto.randomUUID(),
-    true,
-    new Style(fillColor, fillOpacity ?? 0.4, borderWidth ?? 2, {
-      fillColor: style?.fillColor === undefined ? undefined : fillColor,
-      fillOpacity,
-      borderColor: optionalColor(style?.borderColor, "borderColor", notes),
-      borderWidth,
-      borderDash: style?.borderDash,
-    }),
-    new Metadata(location, ""),
-    new Animation(false, 0),
-    geometry
-  );
+  // Border rule (kept from the old renderer): no border unless the model asked
+  // for one; if it asked without giving a width, use 1.
+  const borderRequested =
+    borderColor !== undefined || borderWidth !== undefined || style?.borderDash !== undefined;
+
+  const polygon: PolygonObject = {
+    type: "polygon",
+    id: crypto.randomUUID(),
+    name: name(location),
+    polygons,
+    fillColor,
+    fillOpacity,
+    borderWidth: borderWidth ?? (borderRequested ? 1 : 0),
+    borderDash: style?.borderDash ?? false,
+  };
+  if (borderColor !== undefined) polygon.borderColor = borderColor;
+  ctx.add(polygon);
   ctx.keys.set(key, polygon.id);
   return summary(ctx, [`Created polygon "${location}".`], notes);
 }

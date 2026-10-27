@@ -1,4 +1,4 @@
-import { Point } from "@map-renderer/shared";
+import type { LngLat } from "@map-renderer/shared";
 import {
   PromiseCache,
   REQUEST_TIMEOUT_MS,
@@ -7,15 +7,15 @@ import {
 } from "./nominatim.js";
 
 export class GeocodingService {
-  private readonly cache = new PromiseCache<Point>();
+  private readonly cache = new PromiseCache<LngLat>();
 
-  public getCoordinates(location: string): Promise<Point> {
+  public getCoordinates(location: string): Promise<LngLat> {
     return this.cache.get(normalizeQuery(location), () =>
       nominatimLimiter.run(() => this.fetchCoordinates(location))
     );
   }
 
-  private async fetchCoordinates(location: string): Promise<Point> {
+  private async fetchCoordinates(location: string): Promise<LngLat> {
     const url =
       `https://nominatim.openstreetmap.org/search?` +
       new URLSearchParams({
@@ -41,6 +41,11 @@ export class GeocodingService {
       throw new Error(`Location "${location}" not found.`);
     }
 
-    return new Point(Number(results[0].lat), Number(results[0].lon));
+    const lat = Number(results[0].lat);
+    const lng = Number(results[0].lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      throw new Error(`Geocoder returned invalid coordinates for "${location}".`);
+    }
+    return [lng, lat];
   }
 }

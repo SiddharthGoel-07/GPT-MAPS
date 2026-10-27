@@ -17,7 +17,7 @@ export function registerRenderSceneTool(
 
     async () => {
       const serializedScene =
-        sceneSerializer.serialize(context.scene);
+        sceneSerializer.serialize(context.toScene());
 
       return {
         content: [

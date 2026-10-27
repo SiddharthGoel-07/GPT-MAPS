@@ -1,13 +1,10 @@
-import { LineString, Point } from "@map-renderer/shared";
+import type { LngLat } from "@map-renderer/shared";
 
 export class RoutingService {
-  public async getRoute(
-    start: Point,
-    end: Point
-  ): Promise<LineString> {
+  public async getRoute(start: LngLat, end: LngLat): Promise<LngLat[]> {
     const url =
       `https://router.project-osrm.org/route/v1/driving/` +
-      `${start.longitude},${start.latitude};${end.longitude},${end.latitude}` +
+      `${start[0]},${start[1]};${end[0]},${end[1]}` +
       `?overview=full&geometries=geojson`;
 
     const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
@@ -22,11 +19,8 @@ export class RoutingService {
       throw new Error("No route found.");
     }
 
-    const points = data.routes[0].geometry.coordinates.map(
-      ([longitude, latitude]: [number, number]) =>
-        new Point(latitude, longitude)
+    return (data.routes[0].geometry.coordinates as [number, number][]).map(
+      ([lng, lat]): LngLat => [lng, lat]
     );
-
-    return new LineString(points);
   }
 }

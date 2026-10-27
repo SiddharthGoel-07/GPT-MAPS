@@ -1,43 +1,47 @@
-import { Scene, SceneBuilder } from "@map-renderer/shared";
+import { SCENE_VERSION } from "@map-renderer/shared";
+import type { Scene, SceneObject } from "@map-renderer/shared";
 
 /**
- * Holds the Scene and SceneBuilder for a single request lifecycle.
+ * Holds the scene being built for one MCP session.
  *
- * All MCP tool calls belonging to one independent request must operate on
- * the same Scene, while independent requests (new MCP client connections)
- * must start with a fresh Scene.
- *
- * The `reset()` method replaces the Scene/SceneBuilder with brand-new
- * instances, and is invoked when a new MCP client completes its
- * `initialize` handshake with the server.
+ * Objects are plain data (see the shared scene schema). The only way to
+ * change them is add/remove/reset, and `toScene()` hands out a copy, so
+ * nothing outside this class can mutate the scene behind its back.
  */
 export class RequestContext {
-  public scene: Scene;
-  public sceneBuilder: SceneBuilder;
+  private objects: SceneObject[] = [];
 
   /**
    * De-duplication index for this scene: semantic key -> object id.
    * Keys are built from coordinates (see sceneOps.ts), so "Delhi" and
    * "New Delhi, India" resolve to the same marker. Must always be kept in
-   * sync with `scene`; reset() clears it.
+   * sync with the objects; reset() clears it.
    */
   public readonly keys = new Map<string, string>();
 
-  constructor() {
-    this.scene = new Scene();
-    this.sceneBuilder = new SceneBuilder(this.scene);
+  public add(object: SceneObject): void {
+    this.objects.push(object);
   }
 
-  /**
-   * Drops the current Scene and creates a fresh Scene/SceneBuilder pair.
-   *
-   * Any tool that captured this `RequestContext` instance will read the new
-   * `scene` / `sceneBuilder` on its next invocation, because the tools access
-   * these via the context object reference at call time.
-   */
+  public remove(id: string): void {
+    this.objects = this.objects.filter((o) => o.id !== id);
+  }
+
+  public get(id: string): SceneObject | undefined {
+    return this.objects.find((o) => o.id === id);
+  }
+
+  public count(): number {
+    return this.objects.length;
+  }
+
+  /** A snapshot copy; not validated here (SceneSerializer does that). */
+  public toScene(): Scene {
+    return { version: SCENE_VERSION, objects: [...this.objects] };
+  }
+
   public reset(): void {
     this.keys.clear();
-    this.scene = new Scene();
-    this.sceneBuilder = new SceneBuilder(this.scene);
+    this.objects = [];
   }
 }

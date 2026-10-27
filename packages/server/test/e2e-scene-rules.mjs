@@ -140,9 +140,9 @@ async function main() {
       const r3 = text(await call(cl, "createLabel", { location: "Kochi", text: "k".repeat(200), style: { fontSize: 500, fontWeight: "ultra" } }));
       const o = await scene(cl);
       const m = ofType(o, "marker")[0], p = ofType(o, "path")[0], l = ofType(o, "label")[0];
-      const ok = m.style.options.size === 1.5 && m.style.color === "#ff0000" && p.style.width === 8 && p.style.color === "#0066ff"
-        && l.text.length === 80 && l.style.options.fontSize === 32 && l.style.options.fontWeight === undefined && /Adjusted/.test(r1);
-      record("R10 bad style values clamped/sanitised, model is told", ok, `size=${m.style.options.size} color=${m.style.color} width=${p.style.width} labelLen=${l.text.length} fs=${l.style.options.fontSize}`);
+      const ok = m.size === 1.5 && m.color === "#ff0000" && p.width === 8 && p.color === "#0066ff"
+        && l.text.length === 80 && l.fontSize === 32 && l.fontWeight === "normal" && /Adjusted/.test(r1);
+      record("R10 bad style values clamped/sanitised, model is told", ok, `size=${m.size} color=${m.color} width=${p.width} labelLen=${l.text.length} fs=${l.fontSize}`);
     });
 
     await guard("R11", async () => {

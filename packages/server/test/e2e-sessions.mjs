@@ -46,7 +46,7 @@ async function guard(fn) { try { await fn(); } catch (e) { record("EXCEPTION in 
 async function names(c) {
   const r = await call(c, "renderScene");
   // Auto-created labels are covered by e2e-scene-rules.mjs; here we only compare real features.
-  return JSON.parse(text(r)).objects.filter((o) => o.type !== "label").map((o) => o.metadata.name);
+  return JSON.parse(text(r)).objects.filter((o) => o.type !== "label").map((o) => o.name);
 }
 const health = async (port) => (await fetch(`http://127.0.0.1:${port}/health`)).json();
 const rawPost = (port, body, sid) =>

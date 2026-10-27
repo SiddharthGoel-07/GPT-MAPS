@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Scene } from "@map-renderer/shared";
+import { SceneValidationError, parseScene } from "@map-renderer/shared";
 
 import { MapRenderer } from "../renderer/MapRenderer.js";
-import { SceneDeserializer } from "../SceneDeserializer.js";
 
 interface ChatResponse {
-  scene: object;
+  scene: unknown;
   message: string;
 }
 
@@ -54,14 +53,19 @@ export function MapView() {
 
       const data = (await response.json()) as ChatResponse;
 
-      const sceneDeserializer = new SceneDeserializer();
-      const scene: Scene = sceneDeserializer.deserialize(data.scene);
+      // Throws SceneValidationError (before touching the map) if the server's
+      // scene does not match the shared schema.
+      const scene = parseScene(data.scene);
 
       rendererRef.current?.render(scene);
       setMessage(data.message);
     } catch (error) {
       console.error(error);
-      setMessage("Failed to process request. Please try again.");
+      if (error instanceof SceneValidationError) {
+        setMessage(`The server returned an invalid scene: ${error.message.replace(/^Invalid scene: /, "")}`);
+      } else {
+        setMessage("Failed to process request. Please try again.");
+      }
     } finally {
       setLoading(false);
     }

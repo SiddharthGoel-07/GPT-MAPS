@@ -1,4 +1,4 @@
-import { Point, PolygonGeometry } from "@map-renderer/shared";
+import type { LngLat } from "@map-renderer/shared";
 import {
   PromiseCache,
   REQUEST_TIMEOUT_MS,
@@ -12,9 +12,9 @@ interface GeoJsonGeometry {
 }
 
 export class BoundaryService {
-  private readonly cache = new PromiseCache<PolygonGeometry>(100);
+  private readonly cache = new PromiseCache<LngLat[][][]>(100);
 
-  public getBoundary(location: string): Promise<PolygonGeometry> {
+  public getBoundary(location: string): Promise<LngLat[][][]> {
     return this.cache.get(normalizeQuery(location), () =>
       nominatimLimiter.run(() => this.fetchBoundary(location))
     );
@@ -22,7 +22,7 @@ export class BoundaryService {
 
   private async fetchBoundary(
     location: string
-  ): Promise<PolygonGeometry> {
+  ): Promise<LngLat[][][]> {
     const params = new URLSearchParams({
       q: location,
       format: "geojson",
@@ -60,37 +60,35 @@ export class BoundaryService {
       );
     }
 
-    const points = this.extractPoints(geometry);
+    const ring = this.extractOuterRing(geometry);
 
-    if (points.length === 0) {
+    if (ring.length < 3) {
       throw new Error(
         `No valid coordinates found for "${location}".`
       );
     }
 
-    return new PolygonGeometry(points);
+    // Still only the first polygon's outer ring (islands/holes: flaw B1, later).
+    return [[ring]];
   }
 
-  private extractPoints(geometry: GeoJsonGeometry): Point[] {
-    const points: Point[] = [];
+  private extractOuterRing(geometry: GeoJsonGeometry): LngLat[] {
+    let ring: unknown;
 
     if (geometry.type === "Polygon") {
-      const coordinates = (geometry.coordinates as number[][][])[0] ?? [];
-      for (const [lon, lat] of coordinates as [number, number][]) {
-        points.push(new Point(lat, lon));
-      }
+      ring = (geometry.coordinates as number[][][])[0];
     } else if (geometry.type === "MultiPolygon") {
-      const firstPolygon = (geometry.coordinates as number[][][][])[0] ?? [];
-      const coordinates = firstPolygon[0] ?? [];
-      for (const [lon, lat] of coordinates as [number, number][]) {
-        points.push(new Point(lat, lon));
-      }
+      ring = (geometry.coordinates as number[][][][])[0]?.[0];
     } else {
       throw new Error(
         `Unsupported geometry type: ${geometry.type}. Expected Polygon or MultiPolygon.`
       );
     }
 
+    const points: LngLat[] = [];
+    for (const pair of (ring as [number, number][] | undefined) ?? []) {
+      points.push([pair[0], pair[1]]);
+    }
     return points;
   }
 }
