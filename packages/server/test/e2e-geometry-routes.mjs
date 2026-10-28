@@ -99,7 +99,7 @@ async function main() {
     await guard("G4", async () => {
       const cl = await connect(S.port);
       const r = await call(cl, "createPolygon", { location: "Pointplace" });
-      record("G4 a Point result still fails clearly (B2 will improve this; passes on old code too)", r.isError === true && /Unsupported geometry/.test(text(r)), text(r).slice(0, 100));
+      record("G4 a Point-only result fails with a clear, actionable message (B2)", r.isError === true && /only a point or line, not an area/.test(text(r)) && /more specific/.test(text(r)), text(r).slice(0, 100));
       record("G5 simplified geometry requested from Nominatim (polygon_threshold)", /kind=boundary q=Archipelago A thr=0\.\d+/.test(S.getLog()), "");
     });
 

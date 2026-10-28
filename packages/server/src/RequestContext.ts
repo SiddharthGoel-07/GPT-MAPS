@@ -25,6 +25,10 @@ export class RequestContext {
 
   public remove(id: string): void {
     this.objects = this.objects.filter((o) => o.id !== id);
+    // Keep the de-duplication index in sync: a removed object must be creatable again.
+    for (const [key, value] of this.keys) {
+      if (value === id) this.keys.delete(key);
+    }
   }
 
   public get(id: string): SceneObject | undefined {

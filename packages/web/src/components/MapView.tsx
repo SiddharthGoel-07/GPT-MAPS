@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 
-import { SceneValidationError, parseScene } from "@map-renderer/shared";
+import { SceneValidationError, emptyScene, parseScene } from "@map-renderer/shared";
 
+import {
+  ChatRequestError,
+  endConversation,
+  newConversationId,
+  sendChat,
+} from "../chat/chatClient.js";
 import { MapRenderer } from "../renderer/MapRenderer.js";
-
-interface ChatResponse {
-  scene: unknown;
-  message: string;
-}
 
 export function MapView() {
   const mapContainer = useRef<HTMLDivElement | null>(null);
@@ -15,6 +16,10 @@ export function MapView() {
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
+  const [progress, setProgress] = useState("");
+  // One conversation = one map that keeps growing across prompts. `started`
+  // is true once the server has seen this id (so a "new map" answer means it expired).
+  const conversation = useRef<{ id: string; started: boolean }>({ id: newConversationId(), started: false });
 
   useEffect(() => {
     if (!mapContainer.current) return;
@@ -28,46 +33,63 @@ export function MapView() {
     };
   }, []);
 
+  const AI_SERVER_URL = import.meta.env.VITE_AI_SERVER_URL || "";
+  const AUTH_TOKEN = import.meta.env.VITE_AI_AUTH_TOKEN || undefined;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!prompt.trim() || loading) return;
 
     setLoading(true);
     setMessage("");
+    setProgress("Sending…");
 
     try {
-      const AI_SERVER_URL =
-        import.meta.env.VITE_AI_SERVER_URL || "";
-
-      const response = await fetch(`${AI_SERVER_URL}/api/chat`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ prompt: prompt.trim() }),
+      const data = await sendChat({
+        baseUrl: AI_SERVER_URL,
+        prompt: prompt.trim(),
+        conversationId: conversation.current.id,
+        authToken: AUTH_TOKEN,
+        onProgress: setProgress,
       });
-
-      if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}`);
-      }
-
-      const data = (await response.json()) as ChatResponse;
 
       // Throws SceneValidationError (before touching the map) if the server's
       // scene does not match the shared schema.
       const scene = parseScene(data.scene);
 
       rendererRef.current?.render(scene);
-      setMessage(data.message);
+      const expired = conversation.current.started && data.isNewConversation === true;
+      conversation.current.started = true;
+      setMessage(
+        expired
+          ? `${data.message}\n(The previous map had expired, so this is a new map.)`
+          : data.message
+      );
+      setPrompt("");
     } catch (error) {
       console.error(error);
       if (error instanceof SceneValidationError) {
         setMessage(`The server returned an invalid scene: ${error.message.replace(/^Invalid scene: /, "")}`);
+      } else if (error instanceof ChatRequestError) {
+        setMessage(error.message);
       } else {
-        setMessage("Failed to process request. Please try again.");
+        setMessage("Something went wrong while showing the map. Please try again.");
       }
     } finally {
       setLoading(false);
+      setProgress("");
+    }
+  };
+
+  const handleNewMap = async () => {
+    if (loading) return;
+    const old = conversation.current;
+    conversation.current = { id: newConversationId(), started: false };
+    rendererRef.current?.render(emptyScene());
+    setMessage("");
+    setPrompt("");
+    if (old.started) {
+      await endConversation({ baseUrl: AI_SERVER_URL, conversationId: old.id, authToken: AUTH_TOKEN });
     }
   };
 
@@ -115,12 +137,30 @@ export function MapView() {
               opacity: loading || !prompt.trim() ? 0.6 : 1,
             }}
           >
-            {loading ? "Processing..." : "Show"}
+            {loading ? "Working…" : "Show"}
+          </button>
+          <button
+            type="button"
+            onClick={handleNewMap}
+            disabled={loading}
+            title="Clear the map and start a new one"
+            style={{
+              padding: "10px 16px",
+              borderRadius: 8,
+              border: "1px solid #ccc",
+              backgroundColor: "#fff",
+              color: "#333",
+              fontSize: 14,
+              cursor: loading ? "default" : "pointer",
+              opacity: loading ? 0.6 : 1,
+            }}
+          >
+            New map
           </button>
         </form>
       </div>
 
-      {message && (
+      {(message || (loading && progress)) && (
         <div
           style={{
             position: "absolute",
@@ -133,9 +173,12 @@ export function MapView() {
             backgroundColor: "rgba(255, 255, 255, 0.9)",
             border: "1px solid #ccc",
             fontSize: 13,
+            whiteSpace: "pre-line",
           }}
+          role="status"
+          aria-live="polite"
         >
-          {message}
+          {loading && progress ? progress : message}
         </div>
       )}
 

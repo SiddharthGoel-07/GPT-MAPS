@@ -44,7 +44,7 @@ globalThis.fetch = async (input, init) => {
     const u = new URL(url);
     const q = u.searchParams.get("q") ?? "";
     const kind = u.searchParams.get("format") === "geojson" ? "boundary" : "geocode";
-    console.error(`[stub] nominatim t=${Date.now()} kind=${kind} q=${q} thr=${u.searchParams.get("polygon_threshold") ?? ""}`);
+    console.error(`[stub] nominatim t=${Date.now()} kind=${kind} q=${q} thr=${u.searchParams.get("polygon_threshold") ?? ""} limit=${u.searchParams.get("limit") ?? ""}`);
     await sleep(20 + Math.floor(Math.random() * 40)); // jitter so requests really interleave
     if (q.toLowerCase().includes("nowhere")) {
       return Response.json(kind === "boundary" ? { features: [] } : []);
@@ -70,13 +70,51 @@ globalThis.fetch = async (input, init) => {
       if (cq.startsWith("bigland")) {
         return Response.json({ features: [{ geometry: { type: "Polygon", coordinates: [coastline(200000, 80, 20, 5), square(79, 19, 1)] } }] });
       }
+      // B2: several candidates. A Point ranks first but cannot be highlighted; the area must win.
+      if (cq.startsWith("mixedfeatures")) {
+        return Response.json({ features: [
+          { properties: { display_name: "Mixed Point, Somewhere", importance: 0.9 }, geometry: { type: "Point", coordinates: [lon, lat] } },
+          { properties: { display_name: "Mixed Area, Somewhere", importance: 0.5 }, geometry: { type: "Polygon", coordinates: [square(50, 20, 2)] } },
+        ] });
+      }
+      // Two areas: the later one is more important and must be chosen.
+      if (cq.startsWith("twoareas")) {
+        return Response.json({ features: [
+          { properties: { display_name: "Small Area, Town", importance: 0.3 }, geometry: { type: "Polygon", coordinates: [square(60, 10, 1)] } },
+          { properties: { display_name: "Large Area, Region", importance: 0.8 }, geometry: { type: "Polygon", coordinates: [square(70, 12, 3)] } },
+        ] });
+      }
+      // Only lines/points: nothing to highlight.
+      if (cq.startsWith("onlylines")) {
+        return Response.json({ features: [
+          { properties: { display_name: "A Road", importance: 0.9 }, geometry: { type: "LineString", coordinates: [[1, 1], [2, 2]] } },
+          { properties: { display_name: "A Spot", importance: 0.4 }, geometry: { type: "Point", coordinates: [3, 3] } },
+        ] });
+      }
       if (cq.startsWith("pointplace")) {
         return Response.json({ features: [{ geometry: { type: "Point", coordinates: [lon, lat] } }] });
       }
       const d = 0.5;
-      return Response.json({ features: [{ geometry: { type: "Polygon", coordinates: [[[lon, lat], [lon + d, lat], [lon + d, lat + d], [lon, lat + d], [lon, lat]]] } }] });
+      return Response.json({ features: [{ properties: { display_name: `Stub area: ${q}`, importance: 0.5 }, geometry: { type: "Polygon", coordinates: [[[lon, lat], [lon + d, lat], [lon + d, lat + d], [lon, lat + d], [lon, lat]]] } }] });
     }
-    return Response.json([{ lat: String(lat), lon: String(lon) }]);
+    const lq = q.toLowerCase();
+    // B2: several candidates, the LAST is the most important (Nominatim's order is not trusted blindly).
+    if (lq.startsWith("pickme")) {
+      return Response.json([
+        { lat: "11", lon: "71", display_name: "Pickme Minor, Smallville", importance: 0.2 },
+        { lat: "21", lon: "81", display_name: "Pickme Major, Bigland", importance: 0.9 },
+      ]);
+    }
+    // Three comparable-ish candidates: the 2nd is a real alternative, the 3rd is too unimportant to list.
+    if (lq.startsWith("springfield")) {
+      return Response.json([
+        { lat: "12", lon: "72", display_name: "Springfield, Illinois, USA", importance: 0.7 },
+        { lat: "13", lon: "73", display_name: "Springfield, Missouri, USA", importance: 0.65 },
+        { lat: "14", lon: "74", display_name: "Springfield, Tiny Hamlet", importance: 0.2 },
+        { lat: "999", lon: "74", display_name: "Springfield, Broken Coordinates", importance: 0.69 },
+      ]);
+    }
+    return Response.json([{ lat: String(lat), lon: String(lon), display_name: `Stub place: ${q}`, importance: 0.5 }]);
   }
   if (url.includes("router.project-osrm.org")) {
     console.error(`[stub] osrm t=${Date.now()}`);

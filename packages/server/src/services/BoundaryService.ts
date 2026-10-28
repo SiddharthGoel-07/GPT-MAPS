@@ -16,18 +16,68 @@ function maxPointsFromEnv(): number {
 
 const POLYGON_MAX_POINTS = maxPointsFromEnv();
 
-export class BoundaryService {
-  private readonly cache = new PromiseCache<LngLat[][][]>(100);
+/**
+ * Boundary results are big (every candidate carries its full outline), so we
+ * ask for fewer candidates than for plain geocoding.
+ */
+const CANDIDATES = 3;
+const MAX_NAME_CHARS = 120;
 
-  public getBoundary(location: string): Promise<LngLat[][][]> {
+export interface ResolvedBoundary {
+  polygons: LngLat[][][];
+  /** Full name of the area that was matched. */
+  name: string;
+}
+
+interface Feature {
+  geometry?: { type?: unknown; coordinates?: unknown } | null;
+  properties?: { display_name?: unknown; importance?: unknown } | null;
+}
+
+const shorten = (text: string): string =>
+  text.length > MAX_NAME_CHARS ? `${text.slice(0, MAX_NAME_CHARS - 1)}…` : text;
+
+const isArea = (feature: Feature): boolean =>
+  feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
+
+/**
+ * Chooses the best AREA among the candidates: Points and lines are skipped
+ * (they cannot be highlighted), the most important area wins, ties keep
+ * Nominatim's order. An area whose rings are all unusable is skipped too.
+ * Pure, so it can be tested without a network.
+ */
+export function pickBoundary(features: unknown, query: string): ResolvedBoundary | null {
+  if (!Array.isArray(features)) return null;
+
+  const areas = features
+    .map((raw, order) => ({ feature: raw as Feature, order }))
+    .filter(({ feature }) => typeof feature === "object" && feature !== null && isArea(feature))
+    .map(({ feature, order }) => {
+      const importance = Number(feature.properties?.importance);
+      return { feature, order, importance: Number.isFinite(importance) ? importance : 0 };
+    })
+    .sort((a, b) => b.importance - a.importance || a.order - b.order);
+
+  for (const { feature } of areas) {
+    const polygons = parseGeoJsonPolygons(feature.geometry as { type: string; coordinates: unknown });
+    if (polygons.length === 0) continue;
+    const displayName = feature.properties?.display_name;
+    const name = typeof displayName === "string" && displayName.trim() ? displayName.trim() : query;
+    return { polygons, name: shorten(name) };
+  }
+  return null;
+}
+
+export class BoundaryService {
+  private readonly cache = new PromiseCache<ResolvedBoundary>(100);
+
+  public getBoundary(location: string): Promise<ResolvedBoundary> {
     return this.cache.get(normalizeQuery(location), () =>
       nominatimLimiter.run(() => this.fetchBoundary(location))
     );
   }
 
-  private async fetchBoundary(
-    location: string
-  ): Promise<LngLat[][][]> {
+  private async fetchBoundary(location: string): Promise<ResolvedBoundary> {
     const params = new URLSearchParams({
       q: location,
       format: "geojson",
@@ -35,7 +85,7 @@ export class BoundaryService {
       // Ask for a slightly simplified shape (tolerance in degrees, about 100 m):
       // invisible on a map, but much smaller for countries.
       polygon_threshold: "0.001",
-      limit: "1",
+      limit: String(CANDIDATES),
     });
 
     const url = `https://nominatim.openstreetmap.org/search?${params}`;
@@ -48,35 +98,23 @@ export class BoundaryService {
     });
 
     if (!response.ok) {
-      throw new Error(
-        `Nominatim request failed with status ${response.status}.`
-      );
+      throw new Error(`Nominatim request failed with status ${response.status}.`);
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as { features?: unknown };
 
-    if (!data.features || data.features.length === 0) {
+    if (!Array.isArray(data.features) || data.features.length === 0) {
       throw new Error(`Boundary for "${location}" not found.`);
     }
 
-    const feature = data.features[0];
-    const geometry = feature.geometry;
-
-    if (!geometry) {
+    const best = pickBoundary(data.features, location);
+    if (!best) {
       throw new Error(
-        `Invalid GeoJSON: missing geometry for "${location}".`
+        `"${location}" matched only a point or line, not an area with a boundary. ` +
+          "Try a more specific region name (a city, state or country), or use createMarker to mark the place."
       );
     }
 
-    // Every polygon (islands) and every ring (holes), capped in size.
-    const polygons = parseGeoJsonPolygons(geometry);
-
-    if (polygons.length === 0) {
-      throw new Error(
-        `No valid coordinates found for "${location}".`
-      );
-    }
-
-    return simplifyPolygons(polygons, POLYGON_MAX_POINTS);
+    return { polygons: simplifyPolygons(best.polygons, POLYGON_MAX_POINTS), name: best.name };
   }
 }

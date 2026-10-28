@@ -1,5 +1,4 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import type { McpLike } from "./chatLoop.js";
 
 export interface McpConnection {
@@ -10,12 +9,25 @@ export interface McpConnection {
 
 const CLOSE_TIMEOUT_MS = 2000;
 
-export async function connectMcp(url: string, signal: AbortSignal): Promise<McpConnection> {
-  const transport = new StreamableHTTPClientTransport(new URL(url));
+export interface ConnectOptions {
+  /** Sent as "Authorization: Bearer ..." when the MCP server requires a token. */
+  authToken?: string | undefined;
+}
+
+export async function connectMcp(
+  url: string,
+  signal: AbortSignal,
+  options: ConnectOptions = {}
+): Promise<McpConnection> {
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: options.authToken
+      ? { headers: { Authorization: `Bearer ${options.authToken}` } }
+      : {},
+  });
   const client = new Client({ name: "map-renderer-ai-server", version: "1.0.0" });
 
   try {
-    await client.connect(transport as never, { signal });
+    await client.connect(transport, { signal });
   } catch (error) {
     await client.close().catch(() => undefined);
     throw error;
@@ -23,11 +35,12 @@ export async function connectMcp(url: string, signal: AbortSignal): Promise<McpC
 
   const mcp: McpLike = {
     async listTools(s) {
-      const { tools } = await client.listTools(undefined, { signal: s });
+      // "refresh": always ask the server. A cached answer would hide a lost session.
+      const { tools } = await client.listTools(undefined, { signal: s, cacheMode: "refresh" });
       return tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
     },
     async callTool(name, args, s) {
-      const result = await client.callTool({ name, arguments: args }, undefined, { signal: s });
+      const result = await client.callTool({ name, arguments: args }, { signal: s });
       const blocks = (result.content ?? []) as Array<{ type?: string; text?: string }>;
       const text = blocks.map((b) => (b.type === "text" && b.text ? b.text : "")).join(" ");
       return { text, isError: result.isError === true };

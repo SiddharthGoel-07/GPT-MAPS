@@ -32,9 +32,11 @@ export function registerCreatePolygonTool(
     },
 
     async ({ location, style }) => {
-      const polygon = await boundaryService.getBoundary(location);
+      const boundary = await boundaryService.getBoundary(location);
 
-      const text = addPolygon(context, location, polygon, style);
+      const text =
+        `${addPolygon(context, location, boundary.polygons, style)} ` +
+        `Matched "${location}" to the area "${boundary.name}".`;
 
       return { content: [{ type: "text", text }] };
     }

@@ -7,6 +7,7 @@ import {
 } from "@modelcontextprotocol/server";
 import type { McpServer } from "@modelcontextprotocol/server";
 import { createServer } from "./server.js";
+import { BodyTooLargeError, checkRequest, readBodyLimited, readGuardConfig } from "./httpGuard.js";
 
 /*
  * Session model: one MCP session = one McpServer = one Scene.
@@ -30,6 +31,8 @@ const envInt = (name: string, fallback: number): number => {
 const SESSION_TTL_MS = envInt("SESSION_TTL_MS", 10 * 60_000);
 const SESSION_SWEEP_MS = envInt("SESSION_SWEEP_MS", 30_000);
 const MAX_SESSIONS = envInt("MAX_SESSIONS", 100);
+
+const guard = readGuardConfig();
 
 const sessions = new Map<string, Session>();
 let pendingInits = 0;
@@ -62,15 +65,6 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 function rpcError(res: ServerResponse, status: number, code: number, message: string): void {
   sendJson(res, status, { jsonrpc: "2.0", error: { code, message }, id: null });
-}
-
-function readBody(req: IncomingMessage): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks)));
-    req.on("error", reject);
-  });
 }
 
 function toWebRequest(req: IncomingMessage, url: URL, body: Buffer | undefined): Request {
@@ -128,7 +122,7 @@ async function createSession(): Promise<Session> {
 }
 
 async function handleMcp(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-  const body = req.method === "POST" ? await readBody(req) : undefined;
+  const body = req.method === "POST" ? await readBodyLimited(req, guard.maxBodyBytes) : undefined;
   const header = req.headers["mcp-session-id"];
   const sessionId = Array.isArray(header) ? header[0] : header;
 
@@ -189,8 +183,17 @@ const httpServer = createHttpServer(async (req, res) => {
     if (url.pathname !== "/mcp") {
       return sendJson(res, 404, { error: "Not found. Use /mcp" });
     }
+    const rejection = checkRequest(req, guard);
+    if (rejection) return sendJson(res, rejection.status, { error: rejection.message });
+
     await handleMcp(req, res, url);
   } catch (error) {
+    if (error instanceof BodyTooLargeError) {
+      // Stop the upload: tell the client and drop the connection once the answer is out.
+      res.setHeader("Connection", "close");
+      res.once("finish", () => req.destroy());
+      return rpcError(res, 413, -32000, error.message);
+    }
     console.error("MCP request error:", error);
     if (!res.headersSent) sendJson(res, 500, { error: "Internal server error" });
     else res.end();
@@ -198,8 +201,9 @@ const httpServer = createHttpServer(async (req, res) => {
 });
 
 const port = Number(process.env.PORT) || 3001;
-const host = "0.0.0.0";
+const host = guard.host;
 
 httpServer.listen(port, host, () => {
   console.error(`Map Renderer MCP Server listening on http://${host}:${port}/mcp`);
+  if (guard.authToken === undefined) console.error("[security] MCP_AUTH_TOKEN is not set: no authentication.");
 });

@@ -1,5 +1,6 @@
 import type { ChatLimits } from "./config.js";
 import { ChatError, deadlineError } from "./errors.js";
+import { describeToolCall, withMapContext } from "./mapContext.js";
 
 /*
  * The tool-calling loop, independent of Groq and of the MCP SDK so it can be
@@ -58,8 +59,19 @@ export interface ChatResult {
   message: string;
 }
 
+export interface HistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface RunChatOptions {
   prompt: string;
+  /** Earlier turns of this conversation (oldest first), for follow-up prompts. */
+  history?: readonly HistoryMessage[];
+  /** Summary of what is already on the map (see describeMap); "" or undefined for an empty map. */
+  mapSummary?: string | undefined;
+  /** Called with short human-readable progress texts. Must not throw. */
+  onProgress?: ((text: string) => void) | undefined;
   systemPrompt: string;
   llm: Llm;
   mcp: McpLike;
@@ -101,6 +113,14 @@ export function validatePrompt(prompt: unknown, limits: ChatLimits): string {
 export async function runChat(options: RunChatOptions): Promise<ChatResult> {
   const { systemPrompt, llm, mcp, limits, context } = options;
   const log = options.log ?? (() => undefined);
+  const progress = (text: string | null): void => {
+    if (text === null) return;
+    try {
+      options.onProgress?.(text);
+    } catch {
+      /* progress is best effort */
+    }
+  };
   const { signal } = context;
   const prompt = validatePrompt(options.prompt, limits);
 
@@ -108,7 +128,8 @@ export async function runChat(options: RunChatOptions): Promise<ChatResult> {
 
   const messages: Array<Record<string, unknown>> = [
     { role: "system", content: systemPrompt },
-    { role: "user", content: prompt },
+    ...(options.history ?? []).map((m) => ({ role: m.role, content: m.content })),
+    { role: "user", content: withMapContext(prompt, options.mapSummary ?? "") },
   ];
 
   let modelText = "";
@@ -119,6 +140,7 @@ export async function runChat(options: RunChatOptions): Promise<ChatResult> {
     throwIfAborted(signal);
     turns++;
 
+    progress(turns === 1 ? "Understanding your request…" : "Planning the next step…");
     const reply = await llm.complete(messages, tools, context);
     const text = reply.content?.trim();
     if (text) modelText = text;
@@ -164,6 +186,7 @@ export async function runChat(options: RunChatOptions): Promise<ChatResult> {
         if (typeof args !== "object" || args === null || Array.isArray(args)) {
           throw new Error("Tool arguments must be a JSON object.");
         }
+        progress(describeToolCall(call.name, args as Record<string, unknown>));
         const result = await mcp.callTool(call.name, args as Record<string, unknown>, signal);
         toolText = result.text;
       } catch (error) {
@@ -183,6 +206,7 @@ export async function runChat(options: RunChatOptions): Promise<ChatResult> {
   throwIfAborted(signal);
 
   // Single place where the scene is produced, whatever way the loop ended.
+  progress("Drawing the map…");
   const rendered = await mcp.callTool("renderScene", {}, signal);
   if (rendered.isError) {
     throw new ChatError(502, `The map server could not render the scene: ${rendered.text}`);

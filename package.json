@@ -7,17 +7,21 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run --workspaces --if-present build",
-    "lint": "npm run --workspaces --if-present lint",
-    "format": "npm run --workspaces --if-present format",
-    "dev": "npm run --workspaces --if-present dev",
+    "build": "npm run build -w @map-renderer/shared && npm run build -w @map-renderer/server && npm run build -w @map-renderer/ai-server && npm run build -w @map-renderer/web",
+    "dev": "npm run build -w @map-renderer/shared && concurrently -k -n shared,server,ai,web -c gray,blue,green,magenta \"npm run watch -w @map-renderer/shared\" \"npm run dev -w @map-renderer/server\" \"npm run dev -w @map-renderer/ai-server\" \"npm run dev -w @map-renderer/web\"",
     "dev:server": "npm run dev --workspace @map-renderer/server",
     "dev:ai": "npm run dev --workspace @map-renderer/ai-server",
     "dev:web": "npm run dev --workspace @map-renderer/web",
-    "test": "npm run test -w @map-renderer/shared && npm run test -w @map-renderer/server && npm run test -w @map-renderer/ai-server && npm run test -w @map-renderer/web"
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/test/**/*.{ts,mjs}\"",
+    "format:check": "prettier --check \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/test/**/*.{ts,mjs}\"",
+    "test": "npm run test -w @map-renderer/shared && npm run test -w @map-renderer/server && npm run test -w @map-renderer/ai-server && npm run test -w @map-renderer/web",
+    "verify": "npm run build && npm test && npm run lint"
   },
   "devDependencies": {
     "@eslint/js": "^9.31.0",
+    "concurrently": "^10.0.6",
     "eslint": "^9.31.0",
     "eslint-config-prettier": "^9.1.0",
     "prettier": "^3.3.3",

@@ -322,3 +322,46 @@ export function addPolygon(
   ctx.keys.set(key, polygon.id);
   return summary(ctx, [`Created polygon "${location}".`], notes);
 }
+
+/* ----------------------- clearing and removing objects ----------------------- */
+
+const normalizeName = (value: string): string => value.trim().toLowerCase().replace(/\s+/g, " ");
+const MAX_LISTED_NAMES = 20;
+
+export function clearScene(ctx: RequestContext): string {
+  const removed = ctx.count();
+  ctx.reset();
+  return removed === 0
+    ? "The map was already empty."
+    : `Cleared the map (${removed} object(s) removed). Scene now has 0 object(s).`;
+}
+
+export type RemovableType = "marker" | "label" | "path" | "polygon";
+
+/**
+ * Removes every object whose name matches (ignoring case and extra spaces),
+ * optionally only of one type. A marker and its name label share the place
+ * name, so removing "Delhi" removes both. Throws with the list of existing
+ * names when nothing matches, so the model can correct itself.
+ */
+export function removeObjects(ctx: RequestContext, target: string, type?: RemovableType): string {
+  const wanted = normalizeName(target);
+  const objects = ctx.toScene().objects;
+  const matches = objects.filter(
+    (o) => normalizeName(o.name) === wanted && (type === undefined || o.type === type)
+  );
+
+  if (matches.length === 0) {
+    const names = [...new Set(objects.filter((o) => type === undefined || o.type === type).map((o) => o.name))];
+    const listed = names.slice(0, MAX_LISTED_NAMES).map((n) => `"${n}"`).join(", ");
+    const more = names.length > MAX_LISTED_NAMES ? ` and ${names.length - MAX_LISTED_NAMES} more` : "";
+    throw new Error(
+      `Nothing on the map is named "${target}"${type ? ` (type ${type})` : ""}. ` +
+        (names.length > 0 ? `Names on the map: ${listed}${more}.` : "The map is empty.")
+    );
+  }
+
+  for (const object of matches) ctx.remove(object.id);
+  const kinds = matches.map((o) => o.type).join(", ");
+  return `Removed ${matches.length} object(s) named "${target}" (${kinds}). Scene now has ${ctx.count()} object(s).`;
+}

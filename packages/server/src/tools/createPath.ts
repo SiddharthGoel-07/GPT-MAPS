@@ -4,6 +4,7 @@ import * as z from "zod/v4";
 import { RequestContext } from "../RequestContext.js";
 import { GeocodingService } from "../services/GeocodingService.js";
 import { RoutingService } from "../services/RoutingService.js";
+import { describePlace } from "../services/GeocodingService.js";
 import { addPath, hasPath } from "../sceneOps.js";
 
 export function registerCreatePathTool(
@@ -35,8 +36,10 @@ export function registerCreatePathTool(
     },
 
     async ({ start, end, style }) => {
-      const startPoint = await geocodingService.getCoordinates(start);
-      const endPoint = await geocodingService.getCoordinates(end);
+      const startPlace = await geocodingService.resolve(start);
+      const endPlace = await geocodingService.resolve(end);
+      const startPoint = startPlace.point;
+      const endPoint = endPlace.point;
 
       // Skip the routing request entirely if this exact path is already in the scene.
       const route = hasPath(context, startPoint, endPoint)
@@ -44,7 +47,9 @@ export function registerCreatePathTool(
         : await routingService.getRoute(startPoint, endPoint);
 
       // addPath re-checks synchronously, so two parallel identical calls cannot both insert.
-      const text = addPath(context, start, end, startPoint, endPoint, route, style);
+      const text =
+        `${addPath(context, start, end, startPoint, endPoint, route, style)} ` +
+        `${describePlace(start, startPlace)} ${describePlace(end, endPlace)}`;
 
       return { content: [{ type: "text", text }] };
     }

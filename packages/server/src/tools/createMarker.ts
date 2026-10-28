@@ -3,6 +3,7 @@ import * as z from "zod/v4";
 
 import { RequestContext } from "../RequestContext.js";
 import { GeocodingService } from "../services/GeocodingService.js";
+import { describePlace } from "../services/GeocodingService.js";
 import { addMarker } from "../sceneOps.js";
 
 export function registerCreateMarkerTool(
@@ -34,10 +35,11 @@ export function registerCreateMarkerTool(
     },
 
     async ({ location, label, showLabel, style }) => {
-      const point = await geocodingService.getCoordinates(location);
+      const place = await geocodingService.resolve(location);
 
       // No await between the duplicate check and the insert inside addMarker.
-      const text = addMarker(context, location, point, { label, showLabel, style });
+      const text =
+        `${addMarker(context, location, place.point, { label, showLabel, style })} ${describePlace(location, place)}`;
 
       return { content: [{ type: "text", text }] };
     }

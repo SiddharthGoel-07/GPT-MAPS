@@ -1,4 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
+import { registerClearSceneTool } from "./tools/clearScene.js";
+import { registerRemoveObjectTool } from "./tools/removeObject.js";
 import { registerCreateLabelTool } from "./tools/createLabel.js";
 import { registerCreateMarkerTool } from "./tools/createMarker.js";
 import { registerCreatePathTool } from "./tools/createPath.js";
@@ -33,6 +35,8 @@ export function createServer(): McpServer {
   registerCreateMarkerTool(server, context, geocodingService);
   registerCreatePathTool(server, context, geocodingService, routingService);
   registerCreatePolygonTool(server, context, boundaryService);
+  registerRemoveObjectTool(server, context);
+  registerClearSceneTool(server, context);
   registerRenderSceneTool(server, context, sceneSerializer);
 
   return server;

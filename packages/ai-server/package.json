@@ -21,11 +21,11 @@
     "watch": "tsc -p tsconfig.json --watch",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test test/*.test.ts && node test/e2e-chat.mjs"
+    "test": "node --import tsx --test test/*.test.ts && node test/e2e-chat.mjs && node test/e2e-conversations.mjs && node test/e2e-security.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
     "dotenv": "^17.4.2",
-    "groq": "^6.9.2",
     "groq-sdk": "^1.5.0"
   },
   "devDependencies": {

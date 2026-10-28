@@ -21,7 +21,7 @@
     "watch": "tsc -p tsconfig.json --watch",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "test": "node --test test/serializer.test.mjs test/geometry.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-geometry-routes.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs"
+    "test": "node --test test/serializer.test.mjs test/geometry.test.mjs test/places.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-geometry-routes.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs && node test/e2e-places-edit.mjs && node test/e2e-security.mjs"
   },
   "dependencies": {
     "@map-renderer/shared": "0.1.0",
@@ -29,6 +29,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^26.1.2",
     "tsx": "^4.23.1"
   }

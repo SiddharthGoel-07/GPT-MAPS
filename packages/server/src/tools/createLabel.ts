@@ -3,6 +3,7 @@ import * as z from "zod/v4";
 
 import { RequestContext } from "../RequestContext.js";
 import { GeocodingService } from "../services/GeocodingService.js";
+import { describePlace } from "../services/GeocodingService.js";
 import { addLabel } from "../sceneOps.js";
 
 export function registerCreateLabelTool(
@@ -34,9 +35,9 @@ export function registerCreateLabelTool(
     },
 
     async ({ location, text, style }) => {
-      const point = await geocodingService.getCoordinates(location);
+      const place = await geocodingService.resolve(location);
 
-      const message = addLabel(context, location, point, text, style);
+      const message = `${addLabel(context, location, place.point, text, style)} ${describePlace(location, place)}`;
 
       return { content: [{ type: "text", text: message }] };
     }
