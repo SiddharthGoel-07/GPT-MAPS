@@ -9,6 +9,7 @@ import { validatePrompt } from "./chatLoop.js";
 import type { JsonLlm } from "./groq.js";
 import { budgetBreakdownSchema, type BudgetBreakdown } from "@map-renderer/shared";
 import { TRIP_FOLLOWUP_SYSTEM_PROMPT, TRIP_JSON_SYSTEM_PROMPT, type TripDayDraft, type TripPlanDraft } from "./tripPrompt.js";
+import { sanitizePlaces, sanitizeTripRoutes } from "./tripMapSanitize.js";
 
 export interface TripPlanResult {
   tripTitle: string;
@@ -102,22 +103,32 @@ function parseFollowUpDraft(raw: string): FollowUpDraft {
   };
 }
 
+function mapStops(
+  places: readonly string[],
+  routes: readonly { start: string; end: string }[] | undefined
+): { places: string[]; routes: Array<{ start: string; end: string }> } {
+  const stops = sanitizePlaces(places);
+  const paths = sanitizeTripRoutes(stops, routes);
+  return { places: stops, routes: paths };
+}
+
 async function buildScene(
   mcp: McpLike,
   places: readonly string[],
-  routes: readonly { start: string; end: string }[],
+  routes: readonly { start: string; end: string }[] | undefined,
   signal: AbortSignal,
   log?: (m: string) => void
 ): Promise<Scene> {
   throwIfAborted(signal);
+  const { places: stops, routes: paths } = mapStops(places, routes);
   await mcp.callTool("clearScene", {}, signal);
 
-  for (const location of places) {
+  for (const location of stops) {
     throwIfAborted(signal);
     log?.(`[trip] marker: ${location}`);
     await mcp.callTool("createMarker", { location }, signal);
   }
-  for (const route of routes) {
+  for (const route of paths) {
     throwIfAborted(signal);
     log?.(`[trip] path: ${route.start} → ${route.end}`);
     await mcp.callTool("createPath", { start: route.start, end: route.end }, signal);

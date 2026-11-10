@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, type Server } from "node:http";
 import { runChat, validatePrompt } from "./chatLoop.js";
 import type { ChatResult, McpLike } from "./chatLoop.js";
 import { readConversationConfig, readLimits, readServerConfig } from "./config.js";
@@ -40,6 +40,7 @@ if (!MCP_SERVER_URL) {
 }
 
 const MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-20b";
+console.log(`[AI] Model: ${MODEL}`);
 const limits = readLimits();
 const serverConfig = readServerConfig();
 const conversationConfig = readConversationConfig();
@@ -509,15 +510,57 @@ const httpServer = createHttpServer(async (req, res) => {
 const port = Number(process.env.PORT) || 3002;
 const host = serverConfig.host;
 
-httpServer.listen(port, host, () => {
-  console.error(`AI Server listening on http://${host}:${port}`);
-  console.error(`[security] allowed origins: ${serverConfig.allowedOrigins.join(", ")}`);
-  if (serverConfig.authToken === undefined && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
-    console.error("[security] WARNING: listening beyond this machine without AUTH_TOKEN.");
-  }
-});
+const AI_HTTP_SERVER = Symbol.for("@map-renderer/ai-server.http");
+
+type GlobalWithAiServer = typeof globalThis & { [AI_HTTP_SERVER]?: Server };
+
+function closeHttpServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    server.close(() => done());
+    server.closeAllConnections?.();
+    setTimeout(done, 1500).unref();
+  });
+}
+
+async function releaseListenSlot(): Promise<void> {
+  const g = globalThis as GlobalWithAiServer;
+  const previous = g[AI_HTTP_SERVER];
+  if (!previous) return;
+  delete g[AI_HTTP_SERVER];
+  await closeHttpServer(previous);
+}
+
+void (async () => {
+  await releaseListenSlot();
+  const g = globalThis as GlobalWithAiServer;
+  g[AI_HTTP_SERVER] = httpServer;
+
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`[AI] Port ${port} is already in use. Stop the other ai-server process or set PORT.`);
+      process.exit(1);
+    }
+    console.error("[AI] HTTP server error:", err);
+    process.exit(1);
+  });
+
+  httpServer.listen(port, host, () => {
+    console.error(`AI Server listening on http://${host}:${port}`);
+    console.error(`[security] allowed origins: ${serverConfig.allowedOrigins.join(", ")}`);
+    if (serverConfig.authToken === undefined && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+      console.error("[security] WARNING: listening beyond this machine without AUTH_TOKEN.");
+    }
+  });
+})();
 
 async function shutdown(): Promise<void> {
+  await closeHttpServer(httpServer);
   // Give open MCP sessions a chance to end cleanly, but never hang.
   await Promise.race([store.closeAll(), new Promise<void>((r) => setTimeout(r, 3000).unref())]);
   process.exit(0);

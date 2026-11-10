@@ -33,7 +33,10 @@ Reply with ONLY valid JSON (no markdown fences) matching this shape:
 Rules:
 - Number of days must match what the user asked for (default 3 if unspecified).
 - Use real place names geocodable on OpenStreetMap (cities, landmarks, stations).
-- routes connect consecutive stops; for a single-city day, routes may be empty.
+- places lists stops in visit order for that section's map only — do not add unrelated landmarks.
+- routes must be empty OR each {start,end} must match two adjacent entries in places (same index order).
+- Do not draw routes between stops that are not consecutive in places.
+- For a single-city day, use a short places list and routes may be [] (paths are inferred from order).
 - Respect budget and party size in narrative and budgetSummary.
 - Be specific and actionable, not generic filler.
 - budgetBreakdown.items must cover the main cost categories and sum roughly to totalBudget when given.
@@ -48,7 +51,9 @@ Reply with ONLY valid JSON:
   "routes": [{"start": "A", "end": "B"}]
 }
 
-Keep geocodable place names. Include every stop still relevant plus any new ones. routes may be [].`;
+Keep geocodable place names. Include every stop still relevant plus any new ones.
+places must stay in visit order; routes only between consecutive places (or []).
+Do not add side trips or landmarks the user did not ask for.`;
 
 export type TripRoutePair = { start: string; end: string };
 
