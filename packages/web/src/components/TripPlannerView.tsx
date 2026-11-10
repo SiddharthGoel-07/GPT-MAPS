@@ -132,10 +132,6 @@ export function TripPlannerView() {
     setSavedTrips(listSavedTrips());
   };
 
-  const updatePlanSection = (message: string, scene: TripPlanResponse["overview"]["scene"], title?: string): void => {
-    setPlan((prev) => (prev ? applySectionUpdate(prev, activeTab, message, scene, title) : prev));
-  };
-
   const runTripPlan = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed || loading) return;
