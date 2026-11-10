@@ -5,6 +5,7 @@ import {
   emptyScene,
   parseTripFollowUpResponse,
   parseTripPlanResponse,
+  type Scene,
   type TripPlanResponse,
 } from "@map-renderer/shared";
 
@@ -14,12 +15,15 @@ import { MapRenderer } from "../renderer/MapRenderer.js";
 import {
   deleteSavedTrip,
   listSavedTrips,
+  loadActiveTrip,
   saveTrip,
   sectionKey,
+  writeActiveTripId,
   type SavedTripRecord,
   type TripChatMessage,
 } from "../trip/savedTrips.js";
 import { BudgetBreakdownView } from "./BudgetBreakdown.jsx";
+import { SceneLegend } from "./SceneLegend.jsx";
 
 type TripTab = "overview" | number;
 
@@ -27,28 +31,55 @@ function plainText(message: string): string {
   return message.replace(/^\*\*Day \d+:[^\n]*\*\*\s*/, "").replace(/\*\*/g, "");
 }
 
+function applySectionUpdate(
+  prev: TripPlanResponse,
+  activeTab: TripTab,
+  message: string,
+  scene: TripPlanResponse["overview"]["scene"],
+  title?: string
+): TripPlanResponse {
+  if (activeTab === "overview") {
+    return { ...prev, overview: { message, scene } };
+  }
+  return {
+    ...prev,
+    days: prev.days.map((d) =>
+      d.day === activeTab ? { ...d, message, scene, ...(title ? { title } : {}) } : d
+    ),
+  };
+}
+
+function formatSavedAt(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
 export function TripPlannerView() {
   const mapContainer = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<MapRenderer | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const [mapLoading, setMapLoading] = useState(true);
   const [prompt, setPrompt] = useState("");
-  const [lastPrompt, setLastPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [followUpLoading, setFollowUpLoading] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
-  const [plan, setPlan] = useState<TripPlanResponse | null>(null);
+  const [retryAction, setRetryAction] = useState<"plan" | "followup" | null>(null);
+  const [retryPlanPrompt, setRetryPlanPrompt] = useState("");
+  const [plan, setPlan] = useState<TripPlanResponse | null>(() => loadActiveTrip()?.plan ?? null);
   const [activeTab, setActiveTab] = useState<TripTab>("overview");
   const [followUpPrompt, setFollowUpPrompt] = useState("");
-  const [sectionChats, setSectionChats] = useState<Record<string, TripChatMessage[]>>({});
+  const [sectionChats, setSectionChats] = useState<Record<string, TripChatMessage[]>>(() => loadActiveTrip()?.sectionChats ?? {});
   const [savedTrips, setSavedTrips] = useState<SavedTripRecord[]>(() => listSavedTrips());
-  const [activeSaveId, setActiveSaveId] = useState<string | undefined>();
+  const [activeSaveId, setActiveSaveId] = useState<string | undefined>(() => loadActiveTrip()?.id);
+  const [lastSavedAt, setLastSavedAt] = useState<number | undefined>(() => loadActiveTrip()?.savedAt);
+  const [lastPrompt, setLastPrompt] = useState(() => loadActiveTrip()?.originalPrompt ?? "");
 
   const AI_SERVER_URL = import.meta.env.VITE_AI_SERVER_URL || "";
   const AUTH_TOKEN = import.meta.env.VITE_AI_AUTH_TOKEN || undefined;
 
   useEffect(() => {
     if (!mapContainer.current) return;
-    const renderer = new MapRenderer(mapContainer.current);
+    const renderer = new MapRenderer(mapContainer.current, { onReady: () => setMapLoading(false) });
     rendererRef.current = renderer;
     renderer.render(emptyScene());
     return () => {
@@ -59,6 +90,11 @@ export function TripPlannerView() {
 
   useEffect(() => {
     if (!plan || !rendererRef.current) return;
+    const raw =
+      activeTab === "overview"
+        ? plan.overview.message
+        : (plan.days.find((d) => d.day === activeTab)?.message ?? "");
+    rendererRef.current.setNarrative(plainText(raw));
     if (activeTab === "overview") {
       rendererRef.current.render(plan.overview.scene);
       return;
@@ -78,45 +114,57 @@ export function TripPlannerView() {
     return plan.days.find((d) => d.day === activeTab)?.message ?? "";
   };
 
-  const updatePlanSection = (message: string, scene: TripPlanResponse["overview"]["scene"], title?: string): void => {
-    setPlan((prev) => {
-      if (!prev) return prev;
-      if (activeTab === "overview") {
-        return { ...prev, overview: { message, scene } };
-      }
-      return {
-        ...prev,
-        days: prev.days.map((d) =>
-          d.day === activeTab ? { ...d, message, scene, ...(title ? { title } : {}) } : d
-        ),
-      };
+  const persistTrip = (
+    tripPlan: TripPlanResponse,
+    originalPrompt: string,
+    chats: Record<string, TripChatMessage[]>,
+    saveId: string | undefined
+  ): void => {
+    const saved = saveTrip({
+      ...(saveId ? { id: saveId } : {}),
+      originalPrompt: originalPrompt || tripPlan.tripTitle,
+      plan: tripPlan,
+      sectionChats: chats,
     });
+    writeActiveTripId(saved.id);
+    setActiveSaveId(saved.id);
+    setLastSavedAt(saved.savedAt);
+    setSavedTrips(listSavedTrips());
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!prompt.trim() || loading) return;
+  const runTripPlan = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || loading) return;
+
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     setLoading(true);
     setError("");
+    setRetryAction(null);
     setProgress("Sending…");
 
     try {
-      const trimmed = prompt.trim();
       const raw = await sendTripPlan({
         baseUrl: AI_SERVER_URL,
         prompt: trimmed,
         authToken: AUTH_TOKEN,
         onProgress: setProgress,
+        signal: controller.signal,
       });
       const validated = parseTripPlanResponse(raw);
       setPlan(validated);
       setLastPrompt(trimmed);
       setSectionChats({});
-      setActiveSaveId(undefined);
+      persistTrip(validated, trimmed, {}, undefined);
       setActiveTab("overview");
       setPrompt("");
     } catch (err) {
+      if (controller.signal.aborted) {
+        setProgress("Cancelled.");
+        return;
+      }
       console.error(err);
       if (err instanceof TripPlanValidationError) {
         setError(err.message);
@@ -125,10 +173,18 @@ export function TripPlannerView() {
       } else {
         setError("Something went wrong while planning your trip. Please try again.");
       }
+      setRetryAction("plan");
+      setRetryPlanPrompt(trimmed);
     } finally {
       setLoading(false);
+      if (abortRef.current === controller) abortRef.current = null;
       setProgress("");
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    void runTripPlan(prompt);
   };
 
   const handleFollowUp = async (e: React.FormEvent) => {
@@ -140,8 +196,13 @@ export function TripPlannerView() {
     const history = sectionChats[key] ?? [];
     const day = typeof activeTab === "number" ? plan.days.find((d) => d.day === activeTab) : undefined;
 
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setFollowUpLoading(true);
     setError("");
+    setRetryAction(null);
     setProgress("Updating…");
     setFollowUpPrompt("");
 
@@ -151,6 +212,7 @@ export function TripPlannerView() {
         prompt: userText,
         authToken: AUTH_TOKEN,
         onProgress: setProgress,
+        signal: controller.signal,
         body: {
           prompt: userText,
           tripTitle: plan.tripTitle,
@@ -162,14 +224,21 @@ export function TripPlannerView() {
       });
       const result = parseTripFollowUpResponse(raw);
       const assistantText = plainText(result.message);
-      updatePlanSection(result.message, result.scene, result.title);
+      const nextPlan = applySectionUpdate(plan, activeTab, result.message, result.scene, result.title);
       const nextHistory = [
         ...history,
         { role: "user" as const, content: userText },
         { role: "assistant" as const, content: assistantText },
       ].slice(-12);
-      setSectionChats((prev) => ({ ...prev, [key]: nextHistory }));
+      const nextChats = { ...sectionChats, [key]: nextHistory };
+      setPlan(nextPlan);
+      setSectionChats(nextChats);
+      persistTrip(nextPlan, lastPrompt, nextChats, activeSaveId);
     } catch (err) {
+      if (controller.signal.aborted) {
+        setProgress("Cancelled.");
+        return;
+      }
       console.error(err);
       if (err instanceof TripPlanValidationError) {
         setError(err.message);
@@ -179,22 +248,22 @@ export function TripPlannerView() {
         setError("Could not update this section. Please try again.");
       }
       setFollowUpPrompt(userText);
+      setRetryAction("followup");
     } finally {
       setFollowUpLoading(false);
+      if (abortRef.current === controller) abortRef.current = null;
       setProgress("");
     }
   };
 
-  const handleSave = () => {
-    if (!plan) return;
-    const saved = saveTrip({
-      ...(activeSaveId ? { id: activeSaveId } : {}),
-      originalPrompt: lastPrompt || plan.tripTitle,
-      plan,
-      sectionChats,
-    });
-    setActiveSaveId(saved.id);
-    setSavedTrips(listSavedTrips());
+  const handleCancelAi = () => {
+    abortRef.current?.abort();
+  };
+
+  const activeScene = (): Scene | null => {
+    if (!plan) return null;
+    if (activeTab === "overview") return plan.overview.scene;
+    return plan.days.find((d) => d.day === activeTab)?.scene ?? null;
   };
 
   const handleLoadSaved = (id: string) => {
@@ -204,6 +273,8 @@ export function TripPlannerView() {
     setLastPrompt(record.originalPrompt);
     setSectionChats(record.sectionChats);
     setActiveSaveId(record.id);
+    setLastSavedAt(record.savedAt);
+    writeActiveTripId(record.id);
     setActiveTab("overview");
     setError("");
   };
@@ -211,7 +282,11 @@ export function TripPlannerView() {
   const handleDeleteSaved = (id: string) => {
     deleteSavedTrip(id);
     setSavedTrips(listSavedTrips());
-    if (activeSaveId === id) setActiveSaveId(undefined);
+    if (activeSaveId === id) {
+      setActiveSaveId(undefined);
+      setLastSavedAt(undefined);
+      writeActiveTripId(undefined);
+    }
   };
 
   const handleNewTrip = () => {
@@ -223,6 +298,8 @@ export function TripPlannerView() {
     setFollowUpPrompt("");
     setSectionChats({});
     setActiveSaveId(undefined);
+    setLastSavedAt(undefined);
+    writeActiveTripId(undefined);
     rendererRef.current?.render(emptyScene());
   };
 
@@ -262,9 +339,17 @@ export function TripPlannerView() {
   };
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-        <div ref={mapContainer} style={{ flex: 1, minWidth: 0, height: "100%" }} aria-label="Trip map" />
+    <div className="trip-layout" style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div className="trip-layout-main" style={{ display: "flex", flex: 1, minHeight: 0 }}>
+        <div className="map-stage" style={{ flex: 1, minWidth: 0, height: "100%" }}>
+          {mapLoading && (
+            <div className="map-loading" role="status">
+              Loading map…
+            </div>
+          )}
+          <div ref={mapContainer} className="map-canvas" aria-label="Trip map" />
+          <SceneLegend scene={activeScene()} />
+        </div>
         <div className="trip-panel">
           <div className="trip-section" style={{ flexShrink: 0 }}>
             {savedTrips.length > 0 && (
@@ -309,24 +394,54 @@ export function TripPlannerView() {
                 rows={3}
                 style={{ resize: "vertical" }}
               />
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                 <button type="submit" className="btn btn-primary" disabled={loading || !prompt.trim()} style={{ flex: 1, minWidth: 120 }}>
                   {loading ? "Planning…" : "Plan trip"}
                 </button>
-                {plan && (
-                  <button type="button" className="btn" onClick={handleSave} disabled={loading}>
-                    {activeSaveId ? "Update save" : "Save trip"}
-                  </button>
-                )}
                 <button type="button" className="btn" onClick={handleNewTrip} disabled={loading || followUpLoading}>
                   New trip
                 </button>
               </div>
+              {plan && lastSavedAt && (
+                <p className="muted" style={{ margin: 0, fontSize: 12 }} role="status">
+                  Auto-saved {formatSavedAt(lastSavedAt)}
+                </p>
+              )}
             </form>
-            {(error || ((loading || followUpLoading) && progress)) && (
-              <p className={error && !loading && !followUpLoading ? "error" : "muted"} style={{ margin: "10px 0 0", fontSize: 13 }} role="status">
-                {(loading || followUpLoading) && progress ? progress : error}
-              </p>
+            {((loading || followUpLoading) || progress) && (
+              <div className="ai-activity" role="status" aria-live="polite">
+                {(loading || followUpLoading) && <p className="ai-activity-bar" aria-hidden="true" />}
+                <div className="ai-activity-row">
+                  <span className="ai-activity-text">{progress || "Working…"}</span>
+                  {(loading || followUpLoading) && (
+                    <button type="button" className="btn btn-compact" onClick={handleCancelAi}>
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {error && !loading && !followUpLoading && (
+              <div className="inline-alert error-block" role="alert" style={{ marginTop: 10 }}>
+                <p className="error" style={{ margin: 0, fontSize: 13 }}>
+                  {error}
+                </p>
+                {retryAction === "plan" && retryPlanPrompt && (
+                  <button type="button" className="btn btn-compact" style={{ marginTop: 8 }} onClick={() => void runTripPlan(retryPlanPrompt)}>
+                    Retry
+                  </button>
+                )}
+                {retryAction === "followup" && followUpPrompt.trim() && (
+                  <button
+                    type="button"
+                    className="btn btn-compact"
+                    style={{ marginTop: 8 }}
+                    onClick={() => void handleFollowUp({ preventDefault: () => {} } as React.FormEvent)}
+                  >
+                    Retry
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
