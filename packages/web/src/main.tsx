@@ -1,7 +1,9 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.js";
+import "./maplibreWorker.js";
 import "maplibre-gl/dist/maplibre-gl.css";
+import "./styles.css";
 
 const root = document.getElementById("root");
 

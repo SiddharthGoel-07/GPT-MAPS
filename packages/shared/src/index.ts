@@ -22,3 +22,21 @@ export type {
   SceneObject,
   Scene,
 } from "./scene.js";
+export {
+  TripPlanValidationError,
+  parseTripFollowUpResponse,
+  parseTripPlanResponse,
+  tripFollowUpResponseSchema,
+  tripPlanResponseSchema,
+  budgetBreakdownSchema,
+  tripDaySectionSchema,
+  tripSectionSchema,
+} from "./trip.js";
+export type {
+  BudgetBreakdown,
+  BudgetLine,
+  TripFollowUpResponse,
+  TripPlanResponse,
+  TripDaySection,
+  TripSection,
+} from "./trip.js";

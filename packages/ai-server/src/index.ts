@@ -5,7 +5,8 @@ import type { ChatResult, McpLike } from "./chatLoop.js";
 import { readConversationConfig, readLimits, readServerConfig } from "./config.js";
 import { ConversationStore } from "./conversations.js";
 import { ChatError, deadlineError } from "./errors.js";
-import { createGroqLlm } from "./groq.js";
+import { createGroqJsonLlm, createGroqLlm } from "./groq.js";
+import { runTripFollowUp, runTripPlanner, type TripFollowUpInput, type TripFollowUpResult, type TripPlanResult } from "./tripLoop.js";
 import { KeyPool } from "./keyPool.js";
 import { describeMap } from "./mapContext.js";
 import { connectMcp } from "./mcp.js";
@@ -50,6 +51,7 @@ console.log(
 
 const pool = new KeyPool({ keys: groqApiKeys, log: (message) => console.log(message) });
 const llm = createGroqLlm({ pool, model: MODEL, baseURL: process.env.GROQ_BASE_URL });
+const jsonLlm = createGroqJsonLlm({ pool, model: MODEL, baseURL: process.env.GROQ_BASE_URL });
 
 const store = new ConversationStore({
   connect: (signal) => connectMcp(MCP_SERVER_URL as string, signal, { authToken: serverConfig.mcpAuthToken }),
@@ -84,6 +86,126 @@ async function currentMapSummary(mcp: McpLike, signal: AbortSignal): Promise<str
   } catch {
     if (signal.aborted) throw deadlineError();
     return "";
+  }
+}
+
+interface TripFollowUpBody {
+  prompt?: unknown;
+  tripTitle?: unknown;
+  section?: unknown;
+  sectionTitle?: unknown;
+  currentNarrative?: unknown;
+  history?: unknown;
+}
+
+function parseTripSection(section: unknown): "overview" | number {
+  if (section === "overview") return "overview";
+  if (typeof section === "number" && Number.isInteger(section) && section >= 1 && section <= 30) return section;
+  if (typeof section === "string" && /^\d+$/.test(section)) {
+    const n = Number(section);
+    if (n >= 1 && n <= 30) return n;
+  }
+  throw new ChatError(400, 'section must be "overview" or a day number (1-30).');
+}
+
+function parseFollowUpHistory(raw: unknown): TripFollowUpInput["history"] {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw) || raw.length > 12) {
+    throw new ChatError(400, "history must be an array of at most 12 messages.");
+  }
+  const out: Array<{ role: "user" | "assistant"; content: string }> = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) throw new ChatError(400, "Invalid history entry.");
+    const role = (item as { role?: unknown }).role;
+    const content = (item as { content?: unknown }).content;
+    if ((role !== "user" && role !== "assistant") || typeof content !== "string") {
+      throw new ChatError(400, "Each history entry needs role (user|assistant) and content.");
+    }
+    out.push({ role, content: content.slice(0, 4000) });
+  }
+  return out;
+}
+
+async function handleTripFollowUp(
+  body: TripFollowUpBody,
+  controller: AbortController,
+  onProgress: (text: string) => void
+): Promise<TripFollowUpResult> {
+  if (typeof body.tripTitle !== "string" || body.tripTitle.trim() === "") {
+    throw new ChatError(400, "tripTitle is required.");
+  }
+  if (typeof body.currentNarrative !== "string" || body.currentNarrative.trim() === "") {
+    throw new ChatError(400, "currentNarrative is required.");
+  }
+  const section = parseTripSection(body.section);
+  const validPrompt = validatePrompt(body.prompt, {
+    ...limits,
+    maxPromptChars: Math.max(limits.maxPromptChars, 1000),
+  });
+  const sectionTitle = typeof body.sectionTitle === "string" ? body.sectionTitle.slice(0, 200) : undefined;
+
+  const deadlineAt = Date.now() + limits.requestTimeoutMs;
+  const timer = setTimeout(() => controller.abort(deadlineError()), limits.requestTimeoutMs);
+  let lease: Awaited<ReturnType<ConversationStore["acquire"]>> | undefined;
+
+  try {
+    lease = await store.acquire(undefined, controller.signal);
+    return await runTripFollowUp({
+      input: {
+        prompt: validPrompt,
+        tripTitle: body.tripTitle.trim(),
+        section,
+        sectionTitle,
+        currentNarrative: body.currentNarrative,
+        history: parseFollowUpHistory(body.history),
+      },
+      llm: jsonLlm,
+      mcp: lease.mcp,
+      limits: { ...limits, maxPromptChars: Math.max(limits.maxPromptChars, 1000) },
+      context: { signal: controller.signal, deadlineAt },
+      onProgress,
+      log: (message) => console.log(message),
+    });
+  } catch (error) {
+    if (controller.signal.aborted) throw deadlineError();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    await lease?.release();
+  }
+}
+
+async function handleTrip(
+  body: ChatBody,
+  controller: AbortController,
+  onProgress: (text: string) => void
+): Promise<TripPlanResult> {
+  const validPrompt = validatePrompt(body.prompt, {
+    ...limits,
+    maxPromptChars: Math.max(limits.maxPromptChars, 2000),
+  });
+
+  const deadlineAt = Date.now() + limits.requestTimeoutMs * 2;
+  const timer = setTimeout(() => controller.abort(deadlineError()), limits.requestTimeoutMs * 2);
+  let lease: Awaited<ReturnType<ConversationStore["acquire"]>> | undefined;
+
+  try {
+    lease = await store.acquire(undefined, controller.signal);
+    return await runTripPlanner({
+      prompt: validPrompt,
+      llm: jsonLlm,
+      mcp: lease.mcp,
+      limits: { ...limits, maxPromptChars: Math.max(limits.maxPromptChars, 2000) },
+      context: { signal: controller.signal, deadlineAt },
+      onProgress,
+      log: (message) => console.log(message),
+    });
+  } catch (error) {
+    if (controller.signal.aborted) throw deadlineError();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    await lease?.release();
   }
 }
 
@@ -182,7 +304,11 @@ const httpServer = createHttpServer(async (req, res) => {
       return;
     }
 
-    const isApi = path === "/api/chat" || path.startsWith("/api/conversations/");
+    const isApi =
+      path === "/api/chat" ||
+      path === "/api/trip" ||
+      path === "/api/trip/followup" ||
+      path.startsWith("/api/conversations/");
     if (!isApi) return sendJson(res, 404, { error: "Not found" });
 
     const tokenProblem = checkToken(req, serverConfig);
@@ -194,6 +320,118 @@ const httpServer = createHttpServer(async (req, res) => {
       await store.remove(id);
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    if (req.method === "POST" && path === "/api/trip/followup") {
+      const waitSeconds = rateLimiter.check(req.socket.remoteAddress ?? "unknown");
+      if (waitSeconds !== null) {
+        res.setHeader("Retry-After", String(waitSeconds));
+        throw new ChatError(429, `Too many requests. Please wait ${waitSeconds} seconds and try again.`);
+      }
+
+      const raw = await readBodyLimited(req, serverConfig.maxBodyBytes);
+      let body: TripFollowUpBody;
+      try {
+        const parsed: unknown = JSON.parse(raw.toString("utf-8"));
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+        body = parsed as TripFollowUpBody;
+      } catch {
+        throw new ChatError(400, "Request body must be a JSON object.");
+      }
+
+      const controller = new AbortController();
+      res.on("close", () => {
+        if (!res.writableEnded && !controller.signal.aborted) controller.abort(new Error("client went away"));
+      });
+
+      if (!wantsStream(req)) {
+        sendJson(res, 200, await handleTripFollowUp(body, controller, () => undefined));
+        return;
+      }
+
+      let started = false;
+      const send = (event: unknown): void => {
+        if (res.writableEnded || res.destroyed) return;
+        if (!started) {
+          started = true;
+          res.writeHead(200, {
+            "Content-Type": "application/x-ndjson; charset=utf-8",
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+          });
+        }
+        res.write(`${JSON.stringify(event)}\n`);
+      };
+
+      try {
+        const result = await handleTripFollowUp(body, controller, (text) => send({ type: "progress", text }));
+        send({ type: "result", ...result });
+        res.end();
+      } catch (error) {
+        if (!started) throw error;
+        const status = error instanceof ChatError ? error.status : 500;
+        const message = error instanceof ChatError ? error.message : "Failed to process request";
+        console.error(`Trip follow-up error (${status}): ${message}`, error instanceof ChatError ? (error.cause ?? "") : error);
+        send({ type: "error", status, error: message });
+        res.end();
+      }
+      return;
+    }
+
+    if (req.method === "POST" && path === "/api/trip") {
+      const waitSeconds = rateLimiter.check(req.socket.remoteAddress ?? "unknown");
+      if (waitSeconds !== null) {
+        res.setHeader("Retry-After", String(waitSeconds));
+        throw new ChatError(429, `Too many requests. Please wait ${waitSeconds} seconds and try again.`);
+      }
+
+      const raw = await readBodyLimited(req, serverConfig.maxBodyBytes);
+      let body: ChatBody;
+      try {
+        const parsed: unknown = JSON.parse(raw.toString("utf-8"));
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+        body = parsed as ChatBody;
+      } catch {
+        throw new ChatError(400, "Request body must be a JSON object.");
+      }
+
+      const controller = new AbortController();
+      res.on("close", () => {
+        if (!res.writableEnded && !controller.signal.aborted) controller.abort(new Error("client went away"));
+      });
+
+      if (!wantsStream(req)) {
+        sendJson(res, 200, await handleTrip(body, controller, () => undefined));
+        return;
+      }
+
+      let started = false;
+      const send = (event: unknown): void => {
+        if (res.writableEnded || res.destroyed) return;
+        if (!started) {
+          started = true;
+          res.writeHead(200, {
+            "Content-Type": "application/x-ndjson; charset=utf-8",
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+          });
+        }
+        res.write(`${JSON.stringify(event)}\n`);
+      };
+
+      try {
+        const result = await handleTrip(body, controller, (text) => send({ type: "progress", text }));
+        send({ type: "result", ...result });
+        res.end();
+      } catch (error) {
+        if (!started) throw error;
+        const status = error instanceof ChatError ? error.status : 500;
+        const message = error instanceof ChatError ? error.message : "Failed to process request";
+        console.error(`Trip error (${status}): ${message}`, error instanceof ChatError ? (error.cause ?? "") : error);
+        send({ type: "error", status, error: message });
+        res.end();
+      }
       return;
     }
 

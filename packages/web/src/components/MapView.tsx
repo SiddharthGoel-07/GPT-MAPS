@@ -94,7 +94,7 @@ export function MapView() {
   };
 
   return (
-    <div style={{ position: "relative", width: "100%", height: "100vh" }}>
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
       <div
         style={{
           position: "absolute",
@@ -106,54 +106,24 @@ export function MapView() {
           gap: 8,
         }}
       >
-        <form
-          onSubmit={handleSubmit}
-          style={{ display: "flex", gap: 8, flex: 1 }}
-        >
+        <form onSubmit={handleSubmit} className="floating-bar" style={{ flex: 1, maxWidth: 760, margin: "0 auto" }}>
           <input
             type="text"
+            className="field"
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Describe a map scene, e.g. Show Delhi and Mumbai"
-            style={{
-              flex: 1,
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "1px solid #ccc",
-              fontSize: 14,
-            }}
+            style={{ flex: 1 }}
           />
-          <button
-            type="submit"
-            disabled={loading || !prompt.trim()}
-            style={{
-              padding: "10px 20px",
-              borderRadius: 8,
-              border: "none",
-              backgroundColor: "#0066ff",
-              color: "#fff",
-              fontSize: 14,
-              cursor: loading ? "default" : "pointer",
-              opacity: loading || !prompt.trim() ? 0.6 : 1,
-            }}
-          >
+          <button type="submit" className="btn btn-primary" disabled={loading || !prompt.trim()}>
             {loading ? "Working…" : "Show"}
           </button>
           <button
             type="button"
+            className="btn"
             onClick={handleNewMap}
             disabled={loading}
             title="Clear the map and start a new one"
-            style={{
-              padding: "10px 16px",
-              borderRadius: 8,
-              border: "1px solid #ccc",
-              backgroundColor: "#fff",
-              color: "#333",
-              fontSize: 14,
-              cursor: loading ? "default" : "pointer",
-              opacity: loading ? 0.6 : 1,
-            }}
           >
             New map
           </button>
@@ -162,19 +132,8 @@ export function MapView() {
 
       {(message || (loading && progress)) && (
         <div
-          style={{
-            position: "absolute",
-            bottom: 16,
-            left: 16,
-            right: 16,
-            zIndex: 10,
-            padding: "10px 14px",
-            borderRadius: 8,
-            backgroundColor: "rgba(255, 255, 255, 0.9)",
-            border: "1px solid #ccc",
-            fontSize: 13,
-            whiteSpace: "pre-line",
-          }}
+          className="toast"
+          style={{ position: "absolute", bottom: 16, left: 16, right: 16, zIndex: 10, maxWidth: 760, margin: "0 auto" }}
           role="status"
           aria-live="polite"
         >

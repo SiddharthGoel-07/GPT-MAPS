@@ -7,7 +7,8 @@ import {
   type RenderedState,
 } from "./drawScene.js";
 
-import maplibregl from "maplibre-gl";
+import type { GeoJSON } from "geojson";
+import * as maplibregl from "maplibre-gl";
 import indiaBoundary from "./data/india-boundary.json" with { type: "json" };
 
 export class MapRenderer {
@@ -101,7 +102,7 @@ export class MapRenderer {
 
     this.map.addSource(this.indiaBoundarySourceId, {
       type: "geojson",
-      data: indiaBoundary as GeoJSON.GeoJSON,
+      data: indiaBoundary as GeoJSON,
     });
 
     /*
