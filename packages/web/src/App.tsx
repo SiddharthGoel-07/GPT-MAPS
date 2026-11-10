@@ -12,12 +12,13 @@ function App() {
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
       <header className="app-header">
         <span className="app-title">GPT Maps</span>
+        <span className="app-tagline muted">Natural language → live map</span>
         <div className="segmented" role="tablist" aria-label="Application mode">
           <button type="button" role="tab" aria-selected={mode === "general"} onClick={() => setMode("general")}>
-            Map queries
+            Build a map
           </button>
           <button type="button" role="tab" aria-selected={mode === "trip"} onClick={() => setMode("trip")}>
-            Trip planner
+            Plan a trip
           </button>
         </div>
       </header>

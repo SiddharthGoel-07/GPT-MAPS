@@ -1,4 +1,5 @@
 import type { Scene } from "@map-renderer/shared";
+import { snippetForPlace } from "../map/sceneGuide.js";
 import {
   applyScene,
   disposeState,
@@ -11,12 +12,25 @@ import type { GeoJSON } from "geojson";
 import * as maplibregl from "maplibre-gl";
 import indiaBoundary from "./data/india-boundary.json" with { type: "json" };
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+export interface MapRendererOptions {
+  onReady?: () => void;
+}
+
 export class MapRenderer {
   private readonly map: maplibregl.Map;
 
   // What the last successful render drew (see drawScene.ts).
   private current: RenderedState | null = null;
   private generation = 0;
+  private narrative = "";
 
   private readonly factories: MarkerFactories = {
     createMarker: (marker) => {
@@ -27,8 +41,22 @@ export class MapRenderer {
         .setLngLat(marker.position)
         .addTo(this.map);
 
+      const element = mapMarker.getElement();
+      element.style.cursor = "pointer";
+      element.title = marker.name;
+      element.addEventListener("click", () => {
+        const detail = snippetForPlace(marker.name, this.narrative);
+        const body = detail
+          ? `<strong>${escapeHtml(marker.name)}</strong><p style="margin:8px 0 0;font-size:13px;line-height:1.45">${escapeHtml(detail)}</p>`
+          : `<strong>${escapeHtml(marker.name)}</strong>`;
+        new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "280px" })
+          .setLngLat(marker.position)
+          .setHTML(body)
+          .addTo(this.map);
+      });
+
       if (marker.opacity < 1) {
-        mapMarker.getElement().style.opacity = String(marker.opacity);
+        element.style.opacity = String(marker.opacity);
       }
       return mapMarker;
     },
@@ -54,7 +82,7 @@ export class MapRenderer {
   private readonly indiaBoundaryLayerId =
     "india-boundary-line";
 
-  constructor(container: HTMLDivElement) {
+  constructor(container: HTMLDivElement, options?: MapRendererOptions) {
     this.map = new maplibregl.Map({
       container,
 
@@ -76,6 +104,8 @@ export class MapRenderer {
       // --------------------------------------------------
 
       this.addIndiaBoundary();
+
+      options?.onReady?.();
 
       const scene = this.pendingScene;
       this.pendingScene = null;
@@ -115,6 +145,9 @@ export class MapRenderer {
       id: this.indiaBoundaryLayerId,
       type: "line",
       source: this.indiaBoundarySourceId,
+      layout: {
+        visibility: "visible",
+      },
 
       paint: {
         "line-color": "#333333",
@@ -147,6 +180,10 @@ export class MapRenderer {
    * Only AI-generated objects are replaced; the official India boundary
    * remains untouched.
    */
+  public setNarrative(text: string): void {
+    this.narrative = text;
+  }
+
   public render(scene: Scene): void {
     if (!this.isMapLoaded) {
       this.pendingScene = scene;

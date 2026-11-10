@@ -14,7 +14,33 @@ export interface SavedTripRecord {
 }
 
 const STORAGE_KEY = "gpt-maps-saved-trips";
+const ACTIVE_TRIP_KEY = "gpt-maps-active-trip-id";
 const MAX_SAVED = 20;
+
+export function readActiveTripId(): string | undefined {
+  try {
+    const id = sessionStorage.getItem(ACTIVE_TRIP_KEY);
+    return id && id.length > 0 ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeActiveTripId(id: string | undefined): void {
+  try {
+    if (id) sessionStorage.setItem(ACTIVE_TRIP_KEY, id);
+    else sessionStorage.removeItem(ACTIVE_TRIP_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Restore the trip the user had open in this browser tab session. */
+export function loadActiveTrip(): SavedTripRecord | undefined {
+  const id = readActiveTripId();
+  if (!id) return undefined;
+  return listSavedTrips().find((t) => t.id === id);
+}
 
 function readRaw(): SavedTripRecord[] {
   try {

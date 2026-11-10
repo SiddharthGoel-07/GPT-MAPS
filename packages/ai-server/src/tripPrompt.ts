@@ -16,8 +16,8 @@ Reply with ONLY valid JSON (no markdown fences) matching this shape:
   },
   "overview": {
     "summary": "2-4 paragraph overview of the whole trip",
-    "places": ["place names to highlight on an overview map, in visit order"],
-    "routes": [{"start": "place A", "end": "place B"}]
+    "places": ["2-5 major hubs only: origin city/station, destination, maybe one midpoint — no beaches, plantations, or hotels"],
+    "routes": []
   },
   "days": [
     {
@@ -40,7 +40,10 @@ Rules:
 - Respect budget and party size in narrative and budgetSummary.
 - Be specific and actionable, not generic filler.
 - budgetBreakdown.items must cover the main cost categories and sum roughly to totalBudget when given.
-- dailyTotals should have one entry per trip day when budget is specified.`;
+- dailyTotals should have one entry per trip day when budget is specified.
+- overview.routes must always be []. Side stops (spice plantation, beaches) belong in day places, not overview.
+- Use specific geocodable names (e.g. "Savoi Spice Plantation, Ponda, Goa" not "Spice Plantation"; "City Palace, Jaipur" not "City Palace").
+- Every places entry must disambiguate city and country when the sight name is generic (palace, fort, station, beach, market).`;
 
 export const TRIP_FOLLOWUP_SYSTEM_PROMPT = `You refine ONE section of an existing trip plan based on the user's follow-up message.
 Reply with ONLY valid JSON:

@@ -541,22 +541,35 @@ void (async () => {
   const g = globalThis as GlobalWithAiServer;
   g[AI_HTTP_SERVER] = httpServer;
 
-  httpServer.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EADDRINUSE") {
-      console.error(`[AI] Port ${port} is already in use. Stop the other ai-server process or set PORT.`);
+  const tryListen = (retryMs: number): void => {
+    httpServer.once("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE" && retryMs > 0) {
+        console.error(
+          `[AI] Port ${port} busy, retrying in ${retryMs}ms… (use one dev stack — do not run \`npm run dev:ai\` alongside root \`npm run dev\`)`
+        );
+        setTimeout(() => tryListen(Math.floor(retryMs / 2)), retryMs);
+        return;
+      }
+      if (err.code === "EADDRINUSE") {
+        console.error(
+          `[AI] Port ${port} is already in use. Run only one dev stack (root \`npm run dev\`) and detach the debugger if ai-server will not restart.`
+        );
+        process.exit(1);
+      }
+      console.error("[AI] HTTP server error:", err);
       process.exit(1);
-    }
-    console.error("[AI] HTTP server error:", err);
-    process.exit(1);
-  });
+    });
 
-  httpServer.listen(port, host, () => {
-    console.error(`AI Server listening on http://${host}:${port}`);
-    console.error(`[security] allowed origins: ${serverConfig.allowedOrigins.join(", ")}`);
-    if (serverConfig.authToken === undefined && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
-      console.error("[security] WARNING: listening beyond this machine without AUTH_TOKEN.");
-    }
-  });
+    httpServer.listen(port, host, () => {
+      console.error(`AI Server listening on http://${host}:${port}`);
+      console.error(`[security] allowed origins: ${serverConfig.allowedOrigins.join(", ")}`);
+      if (serverConfig.authToken === undefined && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+        console.error("[security] WARNING: listening beyond this machine without AUTH_TOKEN.");
+      }
+    });
+  };
+
+  tryListen(800);
 })();
 
 async function shutdown(): Promise<void> {

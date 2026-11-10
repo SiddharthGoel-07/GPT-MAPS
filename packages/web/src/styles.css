@@ -31,10 +31,17 @@ textarea {
 .app-header {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   padding: 10px 16px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+}
+
+.app-tagline {
+  font-size: 13px;
+  flex: 1;
+  min-width: 140px;
 }
 
 .app-title {
@@ -341,4 +348,237 @@ textarea {
 
 .error {
   color: #b91c1c;
+}
+
+.btn-compact {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.map-floating-stack {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  right: 16px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.map-floating-stack .floating-bar,
+.map-floating-stack .floating-examples {
+  pointer-events: auto;
+}
+
+.floating-examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  max-width: 760px;
+  width: 100%;
+}
+
+.example-chip-inline {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.example-chip-inline:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.map-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+}
+
+.map-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 200px;
+}
+
+.map-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.map-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(248, 250, 252, 0.85);
+  font-size: 14px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.map-sidebar {
+  display: flex;
+  flex-direction: column;
+  width: min(380px, 42vw);
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.map-sidebar-hint {
+  margin: 0;
+  padding: 12px 16px 0;
+  font-size: 13px;
+}
+
+.map-chat-thread {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px;
+}
+
+.map-sidebar-form {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.map-sidebar-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.example-chips {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 16px 8px;
+}
+
+.example-chip {
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #f9fafb;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.example-chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ai-activity {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.ai-activity-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-activity-text {
+  color: var(--muted);
+}
+
+.ai-activity-bar {
+  height: 3px;
+  margin: 0 0 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), #93c5fd, var(--accent));
+  background-size: 200% 100%;
+  animation: ai-progress 1.2s linear infinite;
+}
+
+@keyframes ai-progress {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.inline-alert {
+  padding: 0 16px 8px;
+}
+
+.error-block {
+  font-size: 13px;
+}
+
+.map-legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 6;
+  max-width: min(280px, calc(100% - 24px));
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.94);
+  font-size: 12px;
+  line-height: 1.4;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.map-legend-title {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.map-legend-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+@media (max-width: 840px) {
+  .trip-layout-main {
+    flex-direction: column !important;
+  }
+
+  .trip-panel {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 48vh;
+    border-left: none !important;
+    border-top: 1px solid var(--border);
+  }
+
+  .app-tagline {
+    display: none;
+  }
 }

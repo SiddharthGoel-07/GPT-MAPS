@@ -49,6 +49,26 @@ export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+function groqUserMessage(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const nested = (error as { error?: { error?: { code?: unknown; message?: unknown } } }).error?.error;
+  const code = typeof nested?.code === "string" ? nested.code : undefined;
+  if (code === "tool_use_failed") {
+    return (
+      "The AI model returned a malformed tool call (often after Groq rate limits). " +
+      "Wait about a minute, use a simpler prompt, or add another GROQ_API_KEY_*."
+    );
+  }
+  if (code === "output_parse_failed") {
+    return "The AI model could not finish its response — usually Groq rate limits. Wait about a minute, then retry with a simpler prompt.";
+  }
+  const message = typeof nested?.message === "string" ? nested.message : undefined;
+  if (message?.includes("rate limit") || message?.includes("Rate limit")) {
+    return "Groq rate limit reached. Wait a minute for tokens to refill, then try again.";
+  }
+  return undefined;
+}
+
 function statusOf(error: unknown): number | undefined {
   if (typeof error === "object" && error !== null && "status" in error) {
     const status = (error as { status?: unknown }).status;
@@ -205,7 +225,12 @@ export class KeyPool {
         }
 
         // 400, 404, 413, 422 ...: retrying or switching keys cannot help.
-        throw new ChatError(502, `The AI provider rejected the request (HTTP ${status}).`, { cause: error });
+        const detail = groqUserMessage(error);
+        throw new ChatError(
+          502,
+          detail ?? `The AI provider rejected the request (HTTP ${status}).`,
+          { cause: error }
+        );
       }
     }
 
