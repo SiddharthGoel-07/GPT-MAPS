@@ -20,6 +20,53 @@ export interface GroqLlmOptions {
   baseURL?: string | undefined;
 }
 
+export interface JsonLlm {
+  completeJson(
+    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+    context: CallContext
+  ): Promise<string>;
+}
+
+export function createGroqJsonLlm(options: GroqLlmOptions): JsonLlm {
+  const clients = new Map<string, Groq>();
+
+  const clientFor = (apiKey: string): Groq => {
+    let client = clients.get(apiKey);
+    if (!client) {
+      client = new Groq({
+        apiKey,
+        maxRetries: 0,
+        ...(options.baseURL ? { baseURL: options.baseURL } : {}),
+      });
+      clients.set(apiKey, client);
+    }
+    return client;
+  };
+
+  return {
+    async completeJson(messages, context: CallContext) {
+      const response = await options.pool.run(
+        (key) =>
+          clientFor(key).chat.completions.create(
+            {
+              model: options.model,
+              messages: messages as never,
+              response_format: { type: "json_object" },
+              max_tokens: options.maxTokens ?? 8192,
+            },
+            { signal: context.signal }
+          ),
+        context
+      );
+
+      const message = response.choices[0]?.message;
+      const content = message?.content?.trim();
+      if (!content) throw new Error("No JSON response from Groq.");
+      return content;
+    },
+  };
+}
+
 export function createGroqLlm(options: GroqLlmOptions): Llm {
   const clients = new Map<string, Groq>();
 

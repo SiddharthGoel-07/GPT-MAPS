@@ -24,6 +24,7 @@
     "test": "node --import tsx --test test/*.test.ts && node test/e2e-chat.mjs && node test/e2e-conversations.mjs && node test/e2e-security.mjs"
   },
   "dependencies": {
+    "@map-renderer/shared": "0.1.0",
     "@modelcontextprotocol/client": "^2.4.0",
     "dotenv": "^17.4.2",
     "groq-sdk": "^1.5.0"
