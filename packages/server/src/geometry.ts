@@ -182,3 +182,65 @@ export function simplifyPolygons(
   }
   return decimateLargest(polygons, maxPoints);
 }
+
+/** Douglas-Peucker on an open polyline (first and last points always kept). */
+function simplifyLine(line: readonly LngLat[], tolerance: number): LngLat[] {
+  if (line.length <= 2) return [...line];
+  const last = line.length - 1;
+  const keep = new Uint8Array(line.length);
+  keep[0] = 1;
+  keep[last] = 1;
+
+  const stack: Array<[number, number]> = [[0, last]];
+  while (stack.length > 0) {
+    const range = stack.pop() as [number, number];
+    const [lo, hi] = range;
+    const a = line[lo] as LngLat;
+    const b = line[hi] as LngLat;
+    let maxDistance = 0;
+    let index = -1;
+    for (let i = lo + 1; i < hi; i++) {
+      const d = distanceToSegment(line[i] as LngLat, a, b);
+      if (d > maxDistance) {
+        maxDistance = d;
+        index = i;
+      }
+    }
+    if (index !== -1 && maxDistance > tolerance) {
+      keep[index] = 1;
+      stack.push([lo, index], [index, hi]);
+    }
+  }
+
+  const out: LngLat[] = [];
+  for (let i = 0; i < line.length; i++) if (keep[i]) out.push(line[i] as LngLat);
+  return out.length >= 2 ? out : [line[0] as LngLat, line[last] as LngLat];
+}
+
+function decimateLine(line: readonly LngLat[], maxPoints: number): LngLat[] {
+  if (line.length <= maxPoints) return [...line];
+  const last = line.length - 1;
+  const budget = Math.max(2, maxPoints);
+  const out: LngLat[] = [];
+  for (let i = 0; i < budget; i++) {
+    const idx = Math.round((i / (budget - 1)) * last);
+    out.push(line[idx] as LngLat);
+  }
+  return out;
+}
+
+/** Fit a routed path into the scene wire limit without losing endpoints. */
+export function simplifyPathCoordinates(coords: readonly LngLat[], maxPoints: number): LngLat[] {
+  if (coords.length <= maxPoints) return [...coords];
+
+  let current = [...coords];
+  let tolerance = 0.00005;
+  for (let step = 0; step < 30; step++) {
+    const next = simplifyLine(current, tolerance);
+    if (next.length < 2) break;
+    current = next;
+    if (current.length <= maxPoints) return current;
+    tolerance *= 1.5;
+  }
+  return decimateLine(coords, maxPoints);
+}

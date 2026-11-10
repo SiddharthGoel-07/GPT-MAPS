@@ -2,6 +2,10 @@ import { MAX_SCENE_WIRE_OBJECTS, isValidColor } from "@map-renderer/shared";
 import type { RouteResult } from "./services/RoutingService.js";
 import type { LabelObject, LngLat, MarkerObject, PathObject, PolygonObject } from "@map-renderer/shared";
 import type { RequestContext } from "./RequestContext.js";
+import { simplifyPathCoordinates } from "./geometry.js";
+
+/** Must match `pathSchema.coordinates` max in `@map-renderer/shared`. */
+const MAX_PATH_COORDINATES = 50_000;
 
 /*
  * Every rule about what a valid scene looks like lives HERE, in code, instead
@@ -252,11 +256,18 @@ export function addPath(
   if (route === null) throw new Error("Internal error: route missing for a new path.");
   assertCapacity(ctx, 1);
 
+  let coordinates = route.coordinates;
+  if (coordinates.length > MAX_PATH_COORDINATES) {
+    const before = coordinates.length;
+    coordinates = simplifyPathCoordinates(coordinates, MAX_PATH_COORDINATES);
+    notes.push(`Route had ${before} points; simplified to ${coordinates.length} for display.`);
+  }
+
   const path: PathObject = {
     type: "path",
     id: crypto.randomUUID(),
     name: name(`${startName} → ${endName}`),
-    coordinates: route.coordinates,
+    coordinates,
     color: color(style?.color, "#0066ff", "path color", notes),
     opacity: clamp(style?.opacity, 0, 1, "opacity", notes) ?? 1,
     width: clamp(style?.width, 1, 8, "width", notes) ?? 4,

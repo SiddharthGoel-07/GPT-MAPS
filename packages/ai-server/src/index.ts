@@ -39,7 +39,7 @@ if (!MCP_SERVER_URL) {
   throw new Error("MCP_SERVER_URL environment variable is required.");
 }
 
-const MODEL = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
+const MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-20b";
 const limits = readLimits();
 const serverConfig = readServerConfig();
 const conversationConfig = readConversationConfig();
