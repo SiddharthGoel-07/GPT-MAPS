@@ -1,343 +1,126 @@
-README.md
 # GPT Maps
 
-AI-powered interactive map visualization built as an **MCP Server + MCP App** for Claude Desktop.
+Turn map questions into live graphics. You chat in plain language; a **Groq**-powered agent calls **MCP tools** to build a geographic **scene**; **MapLibre** draws markers, driving routes, and region outlines on an interactive map.
 
-GPT Maps allows an LLM to control an interactive MapLibre map through custom MCP tools. Instead of only returning textual geographic information, the model can visualize locations, connect places with paths, and display geographic boundaries directly on the map.
-
-## Features
-
-- 📍 **Markers** — place locations on the map
-- 🛣️ **Paths** — connect multiple geographic points
-- 🗺️ **Polygons** — render geographic boundaries
-- 🌍 **Country-aware camera positioning** — intelligently adjusts the map view based on the countries associated with locations
-- 🔎 **Nominatim integration** — resolves geographic boundaries using OpenStreetMap data
-- 🧩 **MCP integration** — exposes map operations as tools that an LLM can call
-- 🖥️ **Claude Desktop integration** — renders the map inside a sandboxed MCP App
-- 📦 **MCPB packaging** — distributable as a Claude Desktop extension
-- 🔄 **Scene-based rendering** — represents map state using shared scene objects
-- 🛡️ **CSP-aware sandboxing** — supports external MapLibre resources inside the MCP App sandbox
+**Demo:** [gpt-maps.onrender.com](https://gpt-maps.onrender.com) · **Upstream:** [SiddharthGoel-07/GPT-MAPS](https://github.com/SiddharthGoel-07/GPT-MAPS)
 
 ---
 
-## Example
-
-A user can ask:
-
-> Show Delhi, Mumbai and Bangalore and connect them with a path.
-
-The LLM can call the MCP tools to create the required scene:
-
-```text
-User
-  ↓
-Claude
-  ↓
-MCP Tool Calls
-  ├── createMarker
-  ├── createMarker
-  ├── createMarker
-  └── createPath
-        ↓
-     Scene
-        ↓
-   SceneSerializer
-        ↓
-   MCP Resource
-        ↓
-   React + MapLibre
-        ↓
- Interactive Map
-
-The result is rendered directly inside the Claude Desktop interface.
-
-Architecture
-
-GPT Maps is structured as a TypeScript monorepo with separate shared, server, and web packages.
-
-GPT Maps
-│
-├── packages/
-│   │
-│   ├── shared/
-│   │   ├── objects/
-│   │   │   ├── Marker
-│   │   │   ├── Path
-│   │   │   └── Polygon
-│   │   │
-│   │   └── scene/
-│   │       └── SceneBuilder
-│   │
-│   ├── server/
-│   │   ├── tools/
-│   │   │   ├── createMarker
-│   │   │   ├── createPath
-│   │   │   ├── createPolygon
-│   │   │   └── renderScene
-│   │   │
-│   │   ├── services/
-│   │   │   └── BoundaryService
-│   │   │
-│   │   └── SceneSerializer
-│   │
-│   └── web/
-│       ├── renderer/
-│       │   └── MapRenderer
-│       ├── SceneDeserializer
-│       └── MCP App
-│
-└── mcpb/
-    └── Claude Desktop package
-Data flow
-LLM
- │
- │ MCP tool calls
- ▼
-MCP Server
- │
- ├── createMarker
- ├── createPath
- ├── createPolygon
- └── renderScene
- │
- ▼
-Scene Model
- │
- ▼
-SceneSerializer
- │
- ▼
-MCP Resource
- │
- ▼
-React MCP App
- │
- ▼
-MapLibre GL
- │
- ▼
-Interactive Map
-MCP Tools
-createMarker
-
-Creates a geographic marker.
-
-Supports an optional country hint used for intelligent camera positioning.
-
-Example:
-
-createMarker(
-  latitude,
-  longitude,
-  label,
-  country
-)
-
-For locations where a country cannot meaningfully be associated with the point, the model can use:
-
-VAGUE
-createPath
-
-Creates a path connecting multiple geographic points.
-
-createPath(
-  points[]
-)
-
-Paths use the same underlying geographic point model as markers.
-
-createPolygon
-
-Creates a geographic polygon from a named region.
-
-The server uses the Nominatim Search API with GeoJSON polygon output to retrieve the boundary.
-
-Region
-  ↓
-Nominatim
-  ↓
-GeoJSON
-  ↓
-Point conversion
-  ↓
-Polygon
-  ↓
-MapLibre
-
-Both Polygon and MultiPolygon GeoJSON geometries are handled.
-
-renderScene
-
-Serializes the current scene and sends it to the MCP App for rendering.
-
-The scene contains objects such as:
-
-Scene
- ├── Markers
- ├── Paths
- └── Polygons
-Country-Aware Camera
-
-GPT Maps uses country information associated with markers to improve the initial map viewport.
-
-For example:
-
-User:
-Show Delhi
-
-The marker can carry:
-
-country = "India"
-
-The server resolves the country's bounding box through Nominatim.
-
-The renderer then combines:
-
-Marker bounds
-        +
-Country bounds
-        ↓
-Combined LngLatBounds
-        ↓
-MapLibre fitBounds()
-
-This prevents a single marker from producing an excessively zoomed-in view.
-
-If:
-
-the country is unavailable,
-the value is VAGUE, or
-Nominatim cannot resolve the country,
-
-the renderer safely falls back to the geographic bounds of the scene objects.
-
-Country requests are also deduplicated within each scene so multiple markers from the same country do not trigger repeated lookups.
-
-Map Rendering
-
-The frontend uses MapLibre GL for rendering.
-
-The renderer maintains the map as a visual representation of the current scene.
-
-Before rendering a new independent scene, existing map objects are cleared:
-
-New renderScene()
-       ↓
-clearMap()
-       ↓
-Remove previous markers
-Remove previous paths
-Remove previous polygons
-       ↓
-Render new scene
-
-This prevents objects from previous independent prompts from accumulating on the same map.
-
-MCP App Sandbox
-
-The MCP App runs inside a sandboxed iframe controlled by the MCP host.
-
-A standard Vite build normally produces:
-
-index.html
-assets/
- ├── index.js
- └── index.css
-
-However, those relative asset URLs are not directly accessible from the MCP App sandbox.
-
-GPT Maps therefore produces a self-contained HTML resource with JavaScript and CSS bundled into the HTML document.
-
-The resulting MCP resource contains:
-
-<script>
-  ...
-</script>
-
-<style>
-  ...
-</style>
-
-with no required:
-
-./assets/
- /assets/
-
-references.
-
-This allows the MCP host to load the entire application from a single HTML resource.
-
-Content Security Policy
-
-MapLibre requires external network access for map resources.
-
-The MCP App therefore declares the required external domain through MCP resource CSP metadata.
-
-For example:
-
-connectDomains:
-  https://demotiles.maplibre.org
-
-The CSP metadata is included in the actual resources/read response so the MCP host can apply the required policy when loading the application.
-
-Technology Stack
-Backend
-TypeScript
-Node.js
-MCP SDK
-Nominatim / OpenStreetMap
-GeoJSON
-Frontend
-React
-TypeScript
-MapLibre GL
-HTML/CSS
-Architecture
-TypeScript monorepo
-Shared domain models
-Scene Builder
-Serialization / deserialization pipeline
-MCP resources and tools
-Distribution
-MCPB
-Claude Desktop
-Project Structure
-packages/
-├── shared/
-│   └── Shared scene/domain models
-│
-├── server/
-│   ├── MCP server
-│   ├── MCP tools
-│   ├── BoundaryService
-│   └── SceneSerializer
-│
-└── web/
-    ├── React MCP App
-    ├── MapRenderer
-    └── SceneDeserializer
-Running Locally
-Requirements
-Node.js
-npm
-Claude Desktop
-MCPB CLI (for packaging)
-Install
+## Highlights
+
+| Mode | What you get |
+|------|----------------|
+| **Map queries** | “Show Delhi and Mumbai and connect them” → geocoded pins, OSRM paths, optional region polygons |
+| **Trip planner** | Multi-day itineraries, per-day maps, budget view, section follow-up chat |
+| **MCP server** | Same drawing logic for browser or Claude Desktop–style MCP hosts (one scene per session) |
+
+**Map objects:** markers, labels, paths (road or straight-line fallback), polygons (Nominatim boundaries, simplified for large areas).
+
+**MCP tools:** `createMarker` · `createLabel` · `createPath` · `createPolygon` · `removeObject` · `clearScene` · `renderScene`
+
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+  subgraph client["Browser :5173"]
+    UI["React UI<br/>Map queries · Trip planner"]
+    MR["MapRenderer<br/>MapLibre GL"]
+    UI --> MR
+  end
+
+  subgraph ai["ai-server :3002"]
+    API["/api/chat · /api/trip"]
+    Loop["Groq LLM + tool loop"]
+    API --> Loop
+  end
+
+  subgraph mcp["server :3001"]
+    MCP["MCP HTTP /mcp"]
+    Tools["createMarker · createPath · … · renderScene"]
+    Scene[("Scene per session")]
+    MCP --> Tools --> Scene
+  end
+
+  subgraph shared["@map-renderer/shared"]
+    Schema["Scene schema · trip models"]
+  end
+
+  subgraph external["External APIs"]
+    NOM["Nominatim"]
+    OSRM["OSRM"]
+    GROQ["Groq API"]
+  end
+
+  UI -->|"POST /api/*"| API
+  Loop --> GROQ
+  Loop -->|"MCP tool calls"| MCP
+  Tools --> NOM
+  Tools --> OSRM
+  Scene -->|"scene JSON"| Loop
+  Loop -->|"scene JSON"| API
+  API -->|"scene JSON"| MR
+  Schema -.-> Scene
+  Schema -.-> MR
+  Schema -.-> API
+```
+
+| Package | Responsibility |
+|---------|----------------|
+| `@map-renderer/shared` | Zod scene schema, types, trip JSON models |
+| `@map-renderer/server` | MCP HTTP, geocoding, routing, boundaries |
+| `@map-renderer/ai-server` | `/api/chat`, `/api/trip`, conversation + MCP sessions |
+| `@map-renderer/web` | UI, map rendering, Vite proxy `/api` → ai-server |
+
+---
+
+## Quick start
+
+**Needs:** Node 20+, npm, at least one [Groq](https://console.groq.com/) API key.
+
+```bash
+git clone https://github.com/SiddharthGoel-07/GPT-MAPS.git
+cd GPT-MAPS
 npm install
-Build
-npm run build
-Package
+npm run build -w @map-renderer/shared
+```
 
-The project can be packaged as an MCPB extension using the official MCPB CLI.
+Create `packages/ai-server/.env` from `.env.example`:
 
-mcpb pack
+```env
+GROQ_API_KEY_1=gsk_...
+MCP_SERVER_URL=http://127.0.0.1:3001/mcp
+PORT=3002
+GROQ_MODEL=openai/gpt-oss-20b
+```
 
-The resulting package can then be installed into Claude Desktop.
+Run everything from the repo root:
 
-MCPB
+```bash
+npm run dev
+```
 
-GPT Maps is distributed as a Claude Desktop MCPB extension.
+Open **http://localhost:5173** — **Map queries** or **Trip planner** in the header.
 
-The package contains:
+> **Tip:** Other packages import `@map-renderer/shared` from **`dist/`**. If you see “does not provide an export named …”, run `npm run build -w @map-renderer/shared` (or use root `npm run dev`, which builds shared first).
 
-map-renderer.mcpb
+Optional `packages/server/.env`: `MCP_AUTH_TOKEN`, body-size limits, Nominatim pacing — see `httpGuard` / server config in code.
+
+---
+
+## Commands
+
+| Script | Use |
+|--------|-----|
+| `npm run dev` | Shared watch + server + ai-server + web |
+| `npm run dev:server` / `dev:ai` / `dev:web` | One service only |
+| `npm run build` | Production build all workspaces |
+| `npm test` | Unit + integration harnesses |
+| `npm run verify` | build + test + lint |
+
+---
+
+## Stack
+
+TypeScript · Model Context Protocol · MapLibre GL · React · Vite · OpenStreetMap / Nominatim · public OSRM routing
