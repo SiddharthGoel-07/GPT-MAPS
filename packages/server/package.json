@@ -24,6 +24,7 @@
     "test": "node --test test/serializer.test.mjs test/geometry.test.mjs test/places.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-geometry-routes.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs && node test/e2e-places-edit.mjs && node test/e2e-security.mjs"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "@map-renderer/shared": "0.1.0",
     "@modelcontextprotocol/server": "^2.0.0",
     "zod": "^4.4.3"

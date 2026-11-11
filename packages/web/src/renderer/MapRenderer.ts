@@ -11,6 +11,7 @@ import {
   type MarkerFactories,
   type RenderedState,
 } from "./drawScene.js";
+import { TrafficOverlay, type TrafficStatus } from "./TrafficOverlay.js";
 import { WeatherOverlay, type WeatherStatus } from "./WeatherOverlay.js";
 
 import type { GeoJSON } from "geojson";
@@ -28,6 +29,8 @@ function escapeHtml(text: string): string {
 export interface MapRendererOptions {
   onReady?: () => void;
   onWeatherStatus?: (status: WeatherStatus) => void;
+  onTrafficStatus?: (status: TrafficStatus) => void;
+  authToken?: string;
 }
 
 export class MapRenderer {
@@ -90,8 +93,10 @@ export class MapRenderer {
   private pendingScene: Scene | null = null;
   private lastScene: Scene | null = null;
   private basemapMode: BasemapMode = "light";
-  private weatherEnabled = false;
+  private weatherEnabled = true;
+  private trafficEnabled = false;
   private readonly weather: WeatherOverlay;
+  private readonly traffic: TrafficOverlay;
 
   // Permanent India boundary layer
   private readonly indiaBoundarySourceId =
@@ -111,6 +116,11 @@ export class MapRenderer {
     });
 
     this.weather = new WeatherOverlay(this.map, (status) => options?.onWeatherStatus?.(status));
+    this.traffic = new TrafficOverlay(
+      this.map,
+      (status) => options?.onTrafficStatus?.(status),
+      options?.authToken
+    );
 
     this.map.on("load", () => {
       this.isMapLoaded = true;
@@ -212,6 +222,15 @@ export class MapRenderer {
     this.weather.setEnabled(on, this.lastScene);
   }
 
+  public setTrafficEnabled(on: boolean): void {
+    this.trafficEnabled = on;
+    this.traffic.setEnabled(on, this.lastScene);
+  }
+
+  public getTrafficEnabled(): boolean {
+    return this.trafficEnabled;
+  }
+
   public setBasemap(mode: BasemapMode): void {
     if (mode === this.basemapMode) return;
 
@@ -225,6 +244,9 @@ export class MapRenderer {
     }
     if (this.weatherEnabled) {
       this.weather.clear();
+    }
+    if (this.trafficEnabled) {
+      this.traffic.clear();
     }
 
     // Register before setStyle so a fast style.load (e.g. inline satellite JSON) is not missed.
@@ -243,6 +265,8 @@ export class MapRenderer {
         } catch (error) {
           console.error("Failed to re-render scene after basemap change", error);
         }
+      } else if (this.trafficEnabled && this.lastScene) {
+        this.traffic.onStyleReady(this.lastScene);
       }
     });
 
@@ -269,10 +293,14 @@ export class MapRenderer {
     if (this.weatherEnabled) {
       void this.weather.sync(scene);
     }
+    if (this.trafficEnabled) {
+      void this.traffic.sync(scene);
+    }
   }
 
   public destroy(): void {
     this.weather.destroy();
+    this.traffic.destroy();
     if (this.current) {
       disposeState(this.map, this.current);
       this.current = null;

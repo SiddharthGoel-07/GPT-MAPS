@@ -2,8 +2,7 @@ import { useState } from "react";
 
 import { MapView } from "./components/MapView.jsx";
 import { TripPlannerView } from "./components/TripPlannerView.jsx";
-import { WeatherToggle } from "./components/WeatherToggle.jsx";
-import { MapRendererProvider, useMapRenderer } from "./mapRendererContext.jsx";
+import { MapRendererProvider } from "./mapRendererContext.jsx";
 import { applyTheme, effectiveTheme, type Theme } from "./theme.js";
 
 type AppMode = "general" | "trip";
@@ -19,8 +18,6 @@ function AppHeader({
   theme: Theme;
   onToggleTheme: () => void;
 }) {
-  const mapRenderer = useMapRenderer();
-
   return (
     <header className="app-header">
       <span className="app-title">GPT Maps</span>
@@ -34,7 +31,6 @@ function AppHeader({
             Plan a trip
           </button>
         </div>
-        <WeatherToggle renderer={mapRenderer} />
         <button
           type="button"
           className="btn btn-compact theme-toggle"
