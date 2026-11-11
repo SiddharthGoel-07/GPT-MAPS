@@ -1,8 +1,11 @@
 import type { TripRoutePair } from "./tripPrompt.js";
+import {
+  cityHintForVagueName,
+  dominantCityHint,
+  normalizePlaceName,
+} from "./tripGeoHints.js";
 
-export function normalizePlaceName(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
+export { normalizePlaceName } from "./tripGeoHints.js";
 
 /** Overview map: drop minor sights, keep city/station hubs. */
 const VAGUE_POI_OVERVIEW =
@@ -10,10 +13,13 @@ const VAGUE_POI_OVERVIEW =
 
 /** Geocoding: append region when the query string is ambiguous globally. */
 const VAGUE_POI_GEOCODE =
-  /\b(plantation|spice|hotel|resort|guesthouse|beach|falls|fort|palace|museum|market|flea|bazaar|temple|church|monument|station|junction|railway|gate|garden|park|ghat|lake|stadium|university|bridge|café|cafe)\b/;
+  /\b(plantation|spice|hotel|resort|guesthouse|beach|falls|fort|palace|museum|market|mall|flea|bazaar|temple|church|monument|station|junction|railway|metro|gate|garden|park|ghat|lake|stadium|university|bridge|café|cafe|restaurant)\b/;
 
 /** Infer region so Nominatim does not match a random global POI (e.g. "Spice Plantation" → Russia). */
 export function inferGeoHint(stops: readonly string[], userPrompt = ""): string {
+  const fromStops = dominantCityHint(stops);
+  if (fromStops) return fromStops;
+
   const blob = `${userPrompt} ${stops.join(" ")}`.toLowerCase();
   if (/\bgoa\b|madgaon|margao|mapusa|vasco|panaji|panjim|calangute|baga|anjuna|dudhsagar/.test(blob)) {
     return "Goa, India";
@@ -25,7 +31,11 @@ export function inferGeoHint(stops: readonly string[], userPrompt = ""): string 
   if (/\bmathura\b|\bvrindavan\b|\bgovardhan\b|\bbraj\b/.test(blob)) {
     return "Mathura, Uttar Pradesh, India";
   }
-  if (/\bdelhi\b|ncr|gurgaon|noida/.test(blob)) return "Delhi, India";
+  if (/\bnoida\b/.test(blob)) return "Noida, Uttar Pradesh, India";
+  if (/\bshamli\b/.test(blob)) return "Shamli, Uttar Pradesh, India";
+  if (/\bbulandshahr\b/.test(blob)) return "Bulandshahr, Uttar Pradesh, India";
+  if (/\bghaziabad\b/.test(blob)) return "Ghaziabad, Uttar Pradesh, India";
+  if (/\bdelhi\b|ncr|gurgaon|gurugram/.test(blob)) return "Delhi, India";
   if (/\bkarnataka\b|bangalore|bengaluru|mysore/.test(blob)) return "Karnataka, India";
   if (/\btamil nadu\b|chennai|madurai/.test(blob)) return "Tamil Nadu, India";
   if (/\brajasthan\b|jaipur|udaipur|jodhpur|agra|fatehpur/.test(blob)) return "Rajasthan, India";
@@ -37,7 +47,8 @@ export function qualifyPlaceForGeocoding(
   name: string,
   hint: string,
   stops: readonly string[],
-  sectionContext = ""
+  sectionContext = "",
+  stopIndex?: number
 ): string {
   const trimmed = name.trim();
   if (!trimmed) return trimmed;
@@ -60,18 +71,31 @@ export function qualifyPlaceForGeocoding(
     const region = /goa|madgaon|panaji|calangute|margao/.test(blob) ? "Goa, India" : hint;
     return `${trimmed}, ${region}`;
   }
-  if (VAGUE_POI_GEOCODE.test(n) && !/\b(city|district)\b/.test(n)) {
-    const region = regionalHintForVaguePoi(n, blob, hint);
+  if (VAGUE_POI_GEOCODE.test(n) && !/\bdistrict\b/.test(n)) {
+    const contextual = regionalHintFromContext(n, blob, hint);
+    const fromStops = cityHintForVagueName(trimmed, stops, stopIndex);
+    const region = placeNameAnchorsToKnownCity(n)
+      ? contextual
+      : (fromStops ?? contextual);
     return `${trimmed}, ${region}`;
   }
   return trimmed;
 }
 
-/** Prefer the day’s cities over trip-wide hints (e.g. Delhi title + Mathura day stops). */
-function regionalHintForVaguePoi(placeName: string, blob: string, fallback: string): string {
+function placeNameAnchorsToKnownCity(placeName: string): boolean {
+  return /\b(mathura|vrindavan|govardhan|shamli|bulandshahr|noida|ghaziabad)\b/.test(placeName);
+}
+
+/** Title / narrative keywords when the stop list does not carry structured cities. */
+function regionalHintFromContext(placeName: string, blob: string, fallback: string): string {
   if (/\bmathura\b/.test(placeName)) return "Mathura, Uttar Pradesh, India";
   if (/\bvrindavan\b/.test(placeName)) return "Vrindavan, Uttar Pradesh, India";
   if (/\bgovardhan\b/.test(placeName)) return "Govardhan, Uttar Pradesh, India";
+  if (/\bshamli\b/.test(placeName) || /\bshamli\b/.test(blob)) return "Shamli, Uttar Pradesh, India";
+  if (/\bbulandshahr\b/.test(placeName) || /\bbulandshahr\b/.test(blob)) {
+    return "Bulandshahr, Uttar Pradesh, India";
+  }
+  if (/\bnoida\b/.test(placeName) || /\bnoida\b/.test(blob)) return "Noida, Uttar Pradesh, India";
   if (/\bvrindavan\b/.test(blob)) return "Vrindavan, Uttar Pradesh, India";
   if (/\bmathura\b|\bgovardhan\b/.test(blob)) return "Mathura, Uttar Pradesh, India";
   return fallback;
@@ -108,7 +132,7 @@ export function sanitizePlaces(places: readonly string[]): string[] {
   return out;
 }
 
-function resolvePlaceIndex(name: string, places: readonly string[]): number | undefined {
+export function resolvePlaceIndex(name: string, places: readonly string[]): number | undefined {
   const n = normalizePlaceName(name);
   for (let i = 0; i < places.length; i++) {
     const pn = normalizePlaceName(places[i] as string);

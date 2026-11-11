@@ -12,6 +12,7 @@ import { TRIP_FOLLOWUP_SYSTEM_PROMPT, TRIP_JSON_SYSTEM_PROMPT, type TripDayDraft
 import {
   inferGeoHint,
   qualifyPlaceForGeocoding,
+  resolvePlaceIndex,
   sanitizeOverviewPlaces,
   sanitizePlaces,
   sanitizeTripRoutes,
@@ -142,20 +143,24 @@ async function buildScene(
   const sectionContext = options?.sectionContext ?? "";
   await mcp.callTool("clearScene", {}, signal);
 
-  const geocode = (location: string): string =>
-    qualifyPlaceForGeocoding(location, geoHint, stops, sectionContext);
+  const geocode = (location: string, stopIndex?: number): string =>
+    qualifyPlaceForGeocoding(location, geoHint, stops, sectionContext, stopIndex);
 
-  for (const location of stops) {
+  for (let i = 0; i < stops.length; i++) {
     throwIfAborted(signal);
-    const query = geocode(location);
+    const location = stops[i]!;
+    const query = geocode(location, i);
     log?.(`[trip] marker: ${query}`);
-    await mcp.callTool("createMarker", { location: query, forceDistinct: true }, signal);
+    const markerResult = await mcp.callTool("createMarker", { location: query, forceDistinct: true }, signal);
+    if (markerResult.isError) {
+      log?.(`[trip] marker failed: ${query} — ${markerResult.text}`);
+    }
   }
   if (drawPaths) {
     for (const route of paths) {
       throwIfAborted(signal);
-      const start = geocode(route.start);
-      const end = geocode(route.end);
+      const start = geocode(route.start, resolvePlaceIndex(route.start, stops));
+      const end = geocode(route.end, resolvePlaceIndex(route.end, stops));
       log?.(`[trip] path: ${start} → ${end}`);
       await mcp.callTool("createPath", { start, end }, signal);
     }
