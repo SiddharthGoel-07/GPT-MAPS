@@ -11,6 +11,7 @@ import type {
   PolygonObject,
   Scene,
 } from "@map-renderer/shared";
+import { routeLabelForPath } from "../map/pathLabels.js";
 import { FIT_MAX_ZOOM, FIT_PADDING, computeSceneBounds } from "./camera.js";
 
 /*
@@ -82,7 +83,12 @@ function closeRing(ring: readonly LngLat[]): LngLat[] {
   return copy;
 }
 
-function drawPath(map: MapLike, state: RenderedState, path: PathObject): void {
+function drawPath(
+  map: MapLike,
+  state: RenderedState,
+  path: PathObject,
+  factories: MarkerFactories
+): void {
   const id = `r${state.generation}-${path.id}`;
   state.sourceIds.push(id);
   map.addSource(id, {
@@ -103,6 +109,23 @@ function drawPath(map: MapLike, state: RenderedState, path: PathObject): void {
 
   state.layerIds.push(id);
   map.addLayer({ id, type: "line", source: id, paint });
+
+  const routeLabel = routeLabelForPath(path);
+  if (routeLabel) {
+    const label: LabelObject = {
+      type: "label",
+      id: `${path.id}-route-label`,
+      name: path.name,
+      position: routeLabel.position,
+      text: routeLabel.text,
+      color: "#1e293b",
+      opacity: 0.96,
+      fontSize: 12,
+      fontWeight: "600",
+      backgroundColor: "rgba(255, 255, 255, 0.9)",
+    };
+    state.overlays.push(factories.createLabel(label));
+  }
 }
 
 function drawPolygon(map: MapLike, state: RenderedState, polygon: PolygonObject): void {
@@ -177,7 +200,7 @@ export function drawScene(
           state.overlays.push(factories.createLabel(object));
           break;
         case "path":
-          drawPath(map, state, object);
+          drawPath(map, state, object, factories);
           break;
         case "polygon":
           drawPolygon(map, state, object);

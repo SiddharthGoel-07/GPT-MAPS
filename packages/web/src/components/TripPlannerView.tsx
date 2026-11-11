@@ -28,9 +28,29 @@ import type { WeatherStatus } from "../renderer/WeatherOverlay.js";
 import { useMapRendererContext } from "../mapRendererContext.jsx";
 import { BasemapToggle } from "./BasemapToggle.jsx";
 import { SceneLegend } from "./SceneLegend.jsx";
+import { TrafficScaleLegend } from "./TrafficScaleLegend.jsx";
 import { TrafficToggle } from "./TrafficToggle.jsx";
 
 type TripTab = "overview" | number;
+
+const TRAFFIC_SESSION_KEY = "gpt-maps-trip-traffic-on";
+
+function readTrafficSession(): boolean {
+  try {
+    return sessionStorage.getItem(TRAFFIC_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeTrafficSession(on: boolean): void {
+  try {
+    if (on) sessionStorage.setItem(TRAFFIC_SESSION_KEY, "1");
+    else sessionStorage.removeItem(TRAFFIC_SESSION_KEY);
+  } catch {
+    /* ignore */
+  }
+}
 
 function plainText(message: string): string {
   return message.replace(/^\*\*Day \d+:[^\n]*\*\*\s*/, "").replace(/\*\*/g, "");
@@ -66,6 +86,7 @@ export function TripPlannerView() {
   const [renderer, setRenderer] = useState<MapRenderer | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus | null>(null);
   const [trafficStatus, setTrafficStatus] = useState<TrafficStatus | null>(null);
+  const [trafficOn, setTrafficOn] = useState(readTrafficSession);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [followUpLoading, setFollowUpLoading] = useState(false);
@@ -110,18 +131,28 @@ export function TripPlannerView() {
 
   useEffect(() => {
     if (!plan || !rendererRef.current) return;
+    const renderer = rendererRef.current;
+    const onDay = typeof activeTab === "number";
     const raw =
       activeTab === "overview"
         ? plan.overview.message
         : (plan.days.find((d) => d.day === activeTab)?.message ?? "");
-    rendererRef.current.setNarrative(plainText(raw));
-    if (activeTab === "overview") {
-      rendererRef.current.render(plan.overview.scene);
+    renderer.setNarrative(plainText(raw));
+
+    if (!onDay) {
+      renderer.setTrafficEnabled(false);
+      renderer.render(plan.overview.scene);
       return;
     }
+
     const day = plan.days.find((d) => d.day === activeTab);
-    if (day) rendererRef.current.render(day.scene);
-  }, [plan, activeTab]);
+    if (!day) return;
+
+    renderer.render(day.scene);
+    if (trafficOn && !renderer.getTrafficEnabled()) {
+      renderer.setTrafficEnabled(true);
+    }
+  }, [plan, activeTab, trafficOn]);
 
   useEffect(() => {
     setFollowUpPrompt("");
@@ -370,11 +401,26 @@ export function TripPlannerView() {
           <div ref={mapContainer} className="map-canvas" aria-label="Trip map" />
           <div className="map-layer-toggles">
             {typeof activeTab === "number" && plan && (
-              <TrafficToggle renderer={renderer} scene={activeScene()} status={trafficStatus} />
+              <TrafficToggle
+                renderer={renderer}
+                scene={activeScene()}
+                status={trafficStatus}
+                enabled={trafficOn}
+                onChange={(on) => {
+                  setTrafficOn(on);
+                  writeTrafficSession(on);
+                }}
+              />
             )}
             <BasemapToggle renderer={renderer} />
           </div>
-          <SceneLegend scene={activeScene()} weatherStatus={weatherStatus} />
+          <div className="map-legend-stack">
+            <TrafficScaleLegend
+              visible={Boolean(trafficStatus?.enabled) && typeof activeTab === "number"}
+              loading={Boolean(trafficStatus?.loading)}
+            />
+            <SceneLegend scene={activeScene()} weatherStatus={weatherStatus} />
+          </div>
         </div>
         <div className="trip-panel">
           <div className="trip-section" style={{ flexShrink: 0 }}>

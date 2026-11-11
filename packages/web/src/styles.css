@@ -548,6 +548,55 @@ textarea {
   text-align: right;
 }
 
+.map-legend-stack {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(300px, calc(100% - 24px));
+  pointer-events: none;
+}
+
+.map-legend-stack .map-legend {
+  position: static;
+  pointer-events: auto;
+}
+
+.traffic-scale-legend {
+  max-width: 100%;
+}
+
+.traffic-scale-bar {
+  height: 8px;
+  border-radius: 4px;
+  margin: 6px 0 8px;
+  border: 1px solid var(--border);
+}
+
+.traffic-scale-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.traffic-scale-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.traffic-scale-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
 .weather-badge {
   display: inline-flex;
   align-items: center;

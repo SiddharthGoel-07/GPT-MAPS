@@ -78,7 +78,7 @@ test("valid scene draws every object type", () => {
   const state = applyScene(map, f, null, mk(marker("m"), label("l"), path("p"), polygon("g", { borderWidth: 2 })), 1);
   assert.deepEqual([...map.sources.keys()].sort(), ["r1-g", "r1-p"]);
   assert.deepEqual([...map.layers.keys()].sort(), ["r1-g", "r1-g-border", "r1-p"]);
-  assert.deepEqual([...f.live].sort(), ["l:l", "m:m"]);
+  assert.deepEqual([...f.live].sort(), ["l:l", "l:p-route-label", "m:m"]);
   assert.equal(state.generation, 1);
 });
 
@@ -222,6 +222,34 @@ test("path styling is passed through, dash only when requested", () => {
   const a = map.layers.get("r1-a").paint, b = map.layers.get("r1-b").paint;
   assert.deepEqual([a["line-width"], a["line-opacity"], a["line-dasharray"]], [6, 0.5, [4, 2]]);
   assert.equal(b["line-dasharray"], undefined);
+});
+
+test("paths get a midpoint label with distance and optional duration", () => {
+  const map = new FakeMap();
+  const f = new FakeFactories();
+  drawScene(
+    map,
+    f,
+    mk({
+      ...path("drive"),
+      distanceMeters: 142_000,
+      durationSeconds: 7_800,
+      dash: false,
+    }),
+    1
+  );
+  assert.ok(f.live.has("l:drive-route-label"));
+  drawScene(
+    map,
+    f,
+    mk({
+      ...path("direct"),
+      distanceMeters: 87_000,
+      dash: true,
+    }),
+    2
+  );
+  assert.ok(f.live.has("l:direct-route-label"));
 });
 
 test("labelCss uses the flat label fields and a default background", () => {
