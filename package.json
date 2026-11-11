@@ -7,11 +7,13 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @map-renderer/shared && npm run build -w @map-renderer/server && npm run build -w @map-renderer/ai-server && npm run build -w @map-renderer/web",
-    "dev": "npm run build -w @map-renderer/shared && concurrently -k -n shared,server,ai,web -c gray,blue,green,magenta \"npm run watch -w @map-renderer/shared\" \"npm run dev -w @map-renderer/server\" \"npm run dev -w @map-renderer/ai-server\" \"npm run dev -w @map-renderer/web\"",
-    "dev:server": "npm run dev --workspace @map-renderer/server",
-    "dev:ai": "npm run dev --workspace @map-renderer/ai-server",
-    "dev:web": "npm run dev --workspace @map-renderer/web",
+    "build:shared": "npm run build -w @map-renderer/shared",
+    "build": "npm run build:shared && npm run build -w @map-renderer/server && npm run build -w @map-renderer/ai-server && npm run build -w @map-renderer/web",
+    "prepare": "npm run build:shared",
+    "dev": "npm run build:shared && concurrently -k -n shared,server,ai,web -c gray,blue,green,magenta \"npm run watch -w @map-renderer/shared\" \"npm run dev -w @map-renderer/server\" \"npm run dev -w @map-renderer/ai-server\" \"npm run dev -w @map-renderer/web\"",
+    "dev:server": "npm run build:shared && npm run dev --workspace @map-renderer/server",
+    "dev:ai": "npm run build:shared && npm run dev --workspace @map-renderer/ai-server",
+    "dev:web": "npm run build:shared && npm run dev --workspace @map-renderer/web",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"packages/*/src/**/*.{ts,tsx}\" \"packages/*/test/**/*.{ts,mjs}\"",

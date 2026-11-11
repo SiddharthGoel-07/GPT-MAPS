@@ -248,7 +248,7 @@ export class MapRenderer {
       this.weather.clear();
     }
     if (this.trafficEnabled) {
-      this.traffic.clear();
+      this.traffic.detachForStyleSwap();
     }
 
     // Register before setStyle so a fast style.load (e.g. inline satellite JSON) is not missed.
@@ -296,7 +296,7 @@ export class MapRenderer {
       void this.weather.sync(scene);
     }
     if (this.trafficEnabled) {
-      void this.traffic.sync(scene);
+      void this.traffic.sync(scene, { allowCache: true });
     }
   }
 

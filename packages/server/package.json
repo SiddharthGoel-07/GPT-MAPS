@@ -19,6 +19,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "node -e \"const fs=require('node:fs'); fs.rmSync('dist', { recursive: true, force: true });\"",
     "watch": "tsc -p tsconfig.json --watch",
+    "predev": "npm run build -w @map-renderer/shared",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "test": "node --test test/serializer.test.mjs test/geometry.test.mjs test/places.test.mjs && node test/e2e-scene-contract.mjs && node test/e2e-geometry-routes.mjs && node test/e2e-scene-rules.mjs && node test/e2e-sessions.mjs && node test/e2e-places-edit.mjs && node test/e2e-security.mjs"
