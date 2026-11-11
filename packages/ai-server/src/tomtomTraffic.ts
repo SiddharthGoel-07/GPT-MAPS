@@ -1,3 +1,4 @@
+import { congestionColor, congestionLevel } from "@map-renderer/shared";
 import type { ServerResponse } from "node:http";
 
 const FLOW_SEGMENT_BASE =
@@ -34,21 +35,11 @@ type FlowBody = {
   flowSegmentData?: {
     currentSpeed?: number;
     freeFlowSpeed?: number;
+    currentTravelTime?: number;
+    freeFlowTravelTime?: number;
     confidence?: number;
   };
 };
-
-/** Blue = free flow → red = heavy traffic (Google-like). */
-export function congestionColor(currentSpeed: number, freeFlowSpeed: number): string {
-  if (!Number.isFinite(freeFlowSpeed) || freeFlowSpeed <= 0) return "#2563eb";
-  const ratio = Math.min(1, Math.max(0, currentSpeed / freeFlowSpeed));
-  if (ratio >= 0.85) return "#1d4ed8";
-  if (ratio >= 0.7) return "#3b82f6";
-  if (ratio >= 0.55) return "#60a5fa";
-  if (ratio >= 0.4) return "#f97316";
-  if (ratio >= 0.25) return "#ef4444";
-  return "#b91c1c";
-}
 
 async function flowAtPoint(lat: number, lon: number, apiKey: string): Promise<FlowBody["flowSegmentData"] | null> {
   const url = `${FLOW_SEGMENT_BASE}?point=${encodeURIComponent(`${lat},${lon}`)}&unit=KMPH&key=${encodeURIComponent(apiKey)}`;
@@ -84,7 +75,7 @@ export type TrafficPathSegment = {
 };
 
 const MAX_PATHS = 12;
-const MAX_SAMPLES = 10;
+const MAX_SAMPLES = 16;
 
 export async function buildTrafficPathSegments(
   paths: TrafficPathInput[],
@@ -101,11 +92,9 @@ export async function buildTrafficPathSegments(
     for (const [lon, lat] of samples) {
       try {
         const flow = await flowAtPoint(lat, lon, apiKey);
-        const cur = flow?.currentSpeed ?? 0;
-        const free = flow?.freeFlowSpeed ?? (cur || 1);
-        colors.push(congestionColor(cur, free));
+        colors.push(flow ? congestionColor(congestionLevel(flow)) : "#94a3b8");
       } catch {
-        colors.push("#6b7280");
+        colors.push("#94a3b8");
       }
       await sleep(40);
     }

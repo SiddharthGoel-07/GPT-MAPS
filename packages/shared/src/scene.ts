@@ -63,6 +63,10 @@ export const pathSchema = z.object({
   opacity,
   width: z.number().min(0.5).max(20),
   dash: z.boolean(),
+  /** Road route length from the router, in meters. */
+  distanceMeters: z.number().min(0).optional(),
+  /** Expected driving time from the router, in seconds. */
+  durationSeconds: z.number().min(0).optional(),
 });
 
 export const polygonSchema = z.object({

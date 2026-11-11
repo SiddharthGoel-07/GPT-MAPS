@@ -1,4 +1,4 @@
-import { MAX_SCENE_WIRE_OBJECTS, isValidColor } from "@map-renderer/shared";
+import { MAX_SCENE_WIRE_OBJECTS, isValidColor, polylineLengthMeters } from "@map-renderer/shared";
 import type { RouteResult } from "./services/RoutingService.js";
 import type { LabelObject, LngLat, MarkerObject, PathObject, PolygonObject } from "@map-renderer/shared";
 import type { RequestContext } from "./RequestContext.js";
@@ -273,6 +273,14 @@ export function addPath(
     width: clamp(style?.width, 1, 8, "width", notes) ?? 4,
     // A straight line is not a road: dashed by default so it does not look like one.
     dash: style?.dash ?? route.straight,
+    distanceMeters: (() => {
+      if (route.distanceMeters != null && Number.isFinite(route.distanceMeters)) {
+        return route.distanceMeters;
+      }
+      const len = polylineLengthMeters(coordinates);
+      return Number.isFinite(len) ? len : undefined;
+    })(),
+    durationSeconds: route.straight ? undefined : route.durationSeconds,
   };
   if (route.straight) {
     notes.push(

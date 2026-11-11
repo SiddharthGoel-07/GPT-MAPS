@@ -1,5 +1,4 @@
 import type { Scene } from "@map-renderer/shared";
-import type { RasterSourceSpecification } from "maplibre-gl";
 import * as maplibregl from "maplibre-gl";
 
 import {
@@ -10,8 +9,6 @@ import {
 
 export type { TrafficStatus };
 
-const TILE_SOURCE_ID = "tomtom-traffic-tiles";
-const TILE_LAYER_ID = "tomtom-traffic-tiles-layer";
 const PATH_SOURCE_ID = "tomtom-traffic-paths";
 const PATH_LAYER_ID = "tomtom-traffic-paths-layer";
 
@@ -46,37 +43,6 @@ export class TrafficOverlay {
     this.authToken = token;
   }
 
-  private ensureTileLayer(): void {
-    if (this.map.getSource(TILE_SOURCE_ID)) return;
-
-    const tiles = [
-      `${window.location.origin}/api/traffic/tiles/{z}/{x}/{y}.png`,
-    ];
-
-    this.map.addSource(TILE_SOURCE_ID, {
-      type: "raster",
-      tiles,
-      tileSize: 256,
-      maxzoom: 22,
-      attribution: "© TomTom",
-    } satisfies RasterSourceSpecification);
-
-    this.map.addLayer({
-      id: TILE_LAYER_ID,
-      type: "raster",
-      source: TILE_SOURCE_ID,
-      paint: {
-        "raster-opacity": 0.55,
-        "raster-fade-duration": 0,
-      },
-    });
-  }
-
-  private removeTileLayer(): void {
-    if (this.map.getLayer(TILE_LAYER_ID)) this.map.removeLayer(TILE_LAYER_ID);
-    if (this.map.getSource(TILE_SOURCE_ID)) this.map.removeSource(TILE_SOURCE_ID);
-  }
-
   private removePathLayer(): void {
     if (this.map.getLayer(PATH_LAYER_ID)) this.map.removeLayer(PATH_LAYER_ID);
     if (this.map.getSource(PATH_SOURCE_ID)) this.map.removeSource(PATH_SOURCE_ID);
@@ -86,7 +52,6 @@ export class TrafficOverlay {
     this.abort?.abort();
     this.abort = null;
     this.removePathLayer();
-    this.removeTileLayer();
     this.loading = false;
     this.pathCount = 0;
     this.error = undefined;
@@ -133,8 +98,6 @@ export class TrafficOverlay {
     }
 
     try {
-      this.ensureTileLayer();
-
       const paths = pathsFromScene(scene);
       this.pathCount = paths.length;
 
@@ -181,8 +144,8 @@ export class TrafficOverlay {
         },
         paint: {
           "line-color": ["get", "color"],
-          "line-width": 7,
-          "line-opacity": 0.95,
+          "line-width": 8,
+          "line-opacity": 0.92,
         },
       });
 
@@ -205,6 +168,5 @@ export class TrafficOverlay {
 
   private clearMarkersOnly(): void {
     this.removePathLayer();
-    this.removeTileLayer();
   }
 }

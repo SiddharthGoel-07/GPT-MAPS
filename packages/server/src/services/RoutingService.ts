@@ -4,6 +4,8 @@ export interface RouteResult {
   coordinates: LngLat[];
   /** true = no road route exists, so this is just a straight line start -> end. */
   straight: boolean;
+  distanceMeters?: number;
+  durationSeconds?: number;
 }
 
 /** OSRM answers with these codes when two points cannot be joined by road. */
@@ -42,15 +44,33 @@ export class RoutingService {
     const routes = data?.routes;
     if (Array.isArray(routes) && routes.length === 0) return straight;
 
-    const coordinates = (routes as Array<{ geometry?: { coordinates?: unknown } }> | undefined)?.[0]
-      ?.geometry?.coordinates;
+    const route = (routes as Array<{
+      geometry?: { coordinates?: unknown };
+      distance?: number;
+      duration?: number;
+    }>)[0];
+
+    if (!route) {
+      throw new Error("Routing service returned an unreadable route.");
+    }
+
+    const coordinates = route.geometry?.coordinates;
     if (!Array.isArray(coordinates) || coordinates.length < 2) {
       throw new Error("Routing service returned an unreadable route.");
     }
 
-    return {
+    const result: RouteResult = {
       coordinates: (coordinates as [number, number][]).map(([lng, lat]): LngLat => [lng, lat]),
       straight: false,
     };
+
+    if (typeof route.distance === "number" && Number.isFinite(route.distance)) {
+      result.distanceMeters = route.distance;
+    }
+    if (typeof route.duration === "number" && Number.isFinite(route.duration)) {
+      result.durationSeconds = route.duration;
+    }
+
+    return result;
   }
 }
