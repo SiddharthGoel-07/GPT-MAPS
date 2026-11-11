@@ -24,9 +24,9 @@ import {
 } from "../trip/savedTrips.js";
 import { BudgetBreakdownView } from "./BudgetBreakdown.jsx";
 import type { WeatherStatus } from "../renderer/WeatherOverlay.js";
+import { useMapRendererContext } from "../mapRendererContext.jsx";
 import { BasemapToggle } from "./BasemapToggle.jsx";
 import { SceneLegend } from "./SceneLegend.jsx";
-import { WeatherToggle } from "./WeatherToggle.jsx";
 
 type TripTab = "overview" | number;
 
@@ -78,6 +78,7 @@ export function TripPlannerView() {
   const [activeSaveId, setActiveSaveId] = useState<string | undefined>(() => loadActiveTrip()?.id);
   const [lastSavedAt, setLastSavedAt] = useState<number | undefined>(() => loadActiveTrip()?.savedAt);
   const [lastPrompt, setLastPrompt] = useState(() => loadActiveTrip()?.originalPrompt ?? "");
+  const { setRenderer: setSharedRenderer } = useMapRendererContext();
 
   const AI_SERVER_URL = import.meta.env.VITE_AI_SERVER_URL || "";
   const AUTH_TOKEN = import.meta.env.VITE_AI_AUTH_TOKEN || undefined;
@@ -90,14 +91,16 @@ export function TripPlannerView() {
     });
     rendererRef.current = renderer;
     setRenderer(renderer);
+    setSharedRenderer(renderer);
     renderer.render(emptyScene());
     return () => {
       rendererRef.current = null;
       setRenderer(null);
+      setSharedRenderer(null);
       setWeatherStatus(null);
       renderer.destroy();
     };
-  }, []);
+  }, [setSharedRenderer]);
 
   useEffect(() => {
     if (!plan || !rendererRef.current) return;
@@ -361,7 +364,6 @@ export function TripPlannerView() {
           <div ref={mapContainer} className="map-canvas" aria-label="Trip map" />
           <div className="map-layer-toggles">
             <BasemapToggle renderer={renderer} />
-            <WeatherToggle renderer={renderer} />
           </div>
           <SceneLegend scene={activeScene()} weatherStatus={weatherStatus} />
         </div>
