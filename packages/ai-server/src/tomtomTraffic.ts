@@ -1,4 +1,4 @@
-import { congestionColor, congestionLevel } from "@map-renderer/shared";
+import { congestionColor, congestionLevel, samplePolyline } from "@map-renderer/shared";
 import type { ServerResponse } from "node:http";
 
 const FLOW_SEGMENT_BASE =
@@ -41,9 +41,16 @@ type FlowBody = {
   };
 };
 
-async function flowAtPoint(lat: number, lon: number, apiKey: string): Promise<FlowBody["flowSegmentData"] | null> {
+async function flowAtPoint(
+  lat: number,
+  lon: number,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<FlowBody["flowSegmentData"] | null> {
+  if (signal?.aborted) return null;
   const url = `${FLOW_SEGMENT_BASE}?point=${encodeURIComponent(`${lat},${lon}`)}&unit=KMPH&key=${encodeURIComponent(apiKey)}`;
-  const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+  const timeout = AbortSignal.timeout(12_000);
+  const res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
   if (!res.ok) return null;
   const data = (await res.json()) as FlowBody;
   return data.flowSegmentData ?? null;
@@ -51,16 +58,6 @@ async function flowAtPoint(lat: number, lon: number, apiKey: string): Promise<Fl
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-function sampleCoordinates(coords: [number, number][], maxSamples: number): [number, number][] {
-  if (coords.length <= maxSamples) return coords;
-  const picked: [number, number][] = [];
-  for (let i = 0; i < maxSamples; i++) {
-    const index = Math.round((i / (maxSamples - 1)) * (coords.length - 1));
-    picked.push(coords[index]!);
-  }
-  return picked;
 }
 
 export type TrafficPathInput = {
@@ -79,21 +76,25 @@ const MAX_SAMPLES = 16;
 
 export async function buildTrafficPathSegments(
   paths: TrafficPathInput[],
-  apiKey: string
+  apiKey: string,
+  signal?: AbortSignal
 ): Promise<TrafficPathSegment[]> {
   const segments: TrafficPathSegment[] = [];
   const limited = paths.slice(0, MAX_PATHS);
 
   for (const path of limited) {
+    if (signal?.aborted) break;
     if (path.coordinates.length < 2) continue;
-    const samples = sampleCoordinates(path.coordinates, MAX_SAMPLES);
+    const samples = samplePolyline(path.coordinates, MAX_SAMPLES);
     const colors: string[] = [];
 
     for (const [lon, lat] of samples) {
+      if (signal?.aborted) break;
       try {
-        const flow = await flowAtPoint(lat, lon, apiKey);
+        const flow = await flowAtPoint(lat, lon, apiKey, signal);
         colors.push(flow ? congestionColor(congestionLevel(flow)) : "#94a3b8");
       } catch {
+        if (signal?.aborted) break;
         colors.push("#94a3b8");
       }
       await sleep(40);

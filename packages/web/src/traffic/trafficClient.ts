@@ -1,4 +1,8 @@
 import type { PathObject, Scene } from "@map-renderer/shared";
+import { samplePolyline } from "@map-renderer/shared";
+
+/** TomTom flow is sampled along the route; full OSRM polylines must not be POSTed. */
+const TRAFFIC_COORD_SAMPLES = 24;
 
 export type TrafficPathSegment = {
   pathId: string;
@@ -21,7 +25,9 @@ export function pathsFromScene(scene: Scene): { id: string; coordinates: [number
     if (path.coordinates.length < 2) continue;
     out.push({
       id: path.id,
-      coordinates: path.coordinates.map((p) => [p[0], p[1]] as [number, number]),
+      coordinates: samplePolyline(path.coordinates, TRAFFIC_COORD_SAMPLES).map(
+        (p) => [p[0], p[1]] as [number, number]
+      ),
     });
   }
   return out;

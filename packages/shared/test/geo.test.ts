@@ -4,6 +4,7 @@ import {
   formatDistanceMeters,
   formatDurationSeconds,
   polylineLengthMeters,
+  samplePolyline,
 } from "../src/geo.js";
 
 test("formatDistanceMeters", () => {
@@ -16,6 +17,14 @@ test("formatDurationSeconds", () => {
   assert.equal(formatDurationSeconds(45 * 60), "45 min");
   assert.equal(formatDurationSeconds(2 * 3600 + 10 * 60), "2 h 10 min");
   assert.equal(formatDurationSeconds(3 * 3600), "3 h");
+});
+
+test("samplePolyline keeps endpoints and caps count", () => {
+  const coords = Array.from({ length: 100 }, (_, i) => [0, i] as [number, number]);
+  const sampled = samplePolyline(coords, 5);
+  assert.equal(sampled.length, 5);
+  assert.deepEqual(sampled[0], [0, 0]);
+  assert.deepEqual(sampled[4], [0, 99]);
 });
 
 test("polylineLengthMeters is sum of segments", () => {

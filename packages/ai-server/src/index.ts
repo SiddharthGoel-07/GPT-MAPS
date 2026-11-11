@@ -332,7 +332,15 @@ const httpServer = createHttpServer(async (req, res) => {
       const apiKey = readTomTomApiKey();
       if (!apiKey) throw new ChatError(503, "TomTom API key is not configured.");
 
-      const raw = await readBodyLimited(req, serverConfig.maxBodyBytes);
+      const trafficBodyLimit = Math.max(serverConfig.maxBodyBytes, 256 * 1024);
+      const controller = new AbortController();
+      res.on("close", () => {
+        if (!res.writableEnded && !controller.signal.aborted) {
+          controller.abort(new Error("client disconnected"));
+        }
+      });
+
+      const raw = await readBodyLimited(req, trafficBodyLimit);
       let body: { paths?: unknown };
       try {
         const parsed: unknown = JSON.parse(raw.toString("utf-8"));
@@ -364,7 +372,8 @@ const httpServer = createHttpServer(async (req, res) => {
         }))
         .filter((p) => p.coordinates.length >= 2);
 
-      const segments = await buildTrafficPathSegments(paths, apiKey);
+      const segments = await buildTrafficPathSegments(paths, apiKey, controller.signal);
+      if (controller.signal.aborted) return;
       sendJson(res, 200, { segments });
       return;
     }

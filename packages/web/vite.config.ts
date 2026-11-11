@@ -10,6 +10,9 @@ export default defineConfig({
       "/api": {
         target: "http://127.0.0.1:3002",
         changeOrigin: true,
+        // Traffic paths can fan out to many TomTom flow-segment calls.
+        timeout: 120_000,
+        proxyTimeout: 120_000,
       },
     },
   },
