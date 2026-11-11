@@ -9,7 +9,10 @@ import {
   sendChat,
 } from "../chat/chatClient.js";
 import { MapRenderer } from "../renderer/MapRenderer.js";
+import type { WeatherStatus } from "../renderer/WeatherOverlay.js";
+import { BasemapToggle } from "./BasemapToggle.jsx";
 import { SceneLegend } from "./SceneLegend.jsx";
+import { WeatherToggle } from "./WeatherToggle.jsx";
 
 const EXAMPLE_PROMPTS = [
   "Show Delhi, Mumbai, and Bangalore",
@@ -28,6 +31,8 @@ export function MapView() {
   const [statusMessage, setStatusMessage] = useState("");
   const [progress, setProgress] = useState("");
   const [scene, setScene] = useState<Scene | null>(null);
+  const [renderer, setRenderer] = useState<MapRenderer | null>(null);
+  const [weatherStatus, setWeatherStatus] = useState<WeatherStatus | null>(null);
   const [retryPrompt, setRetryPrompt] = useState<string | null>(null);
   const conversation = useRef<{ id: string; started: boolean }>({ id: newConversationId(), started: false });
 
@@ -39,11 +44,15 @@ export function MapView() {
 
     const renderer = new MapRenderer(mapContainer.current, {
       onReady: () => setMapLoading(false),
+      onWeatherStatus: setWeatherStatus,
     });
     rendererRef.current = renderer;
+    setRenderer(renderer);
 
     return () => {
       rendererRef.current = null;
+      setRenderer(null);
+      setWeatherStatus(null);
       renderer.destroy();
     };
   }, []);
@@ -206,7 +215,11 @@ export function MapView() {
           </div>
         )}
         <div ref={mapContainer} className="map-canvas" aria-label="Interactive map" />
-        <SceneLegend scene={scene} />
+        <div className="map-layer-toggles">
+          <BasemapToggle renderer={renderer} />
+          <WeatherToggle renderer={renderer} />
+        </div>
+        <SceneLegend scene={scene} weatherStatus={weatherStatus} />
       </div>
     </div>
   );

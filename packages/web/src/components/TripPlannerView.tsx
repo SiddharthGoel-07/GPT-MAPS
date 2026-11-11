@@ -23,7 +23,10 @@ import {
   type TripChatMessage,
 } from "../trip/savedTrips.js";
 import { BudgetBreakdownView } from "./BudgetBreakdown.jsx";
+import type { WeatherStatus } from "../renderer/WeatherOverlay.js";
+import { BasemapToggle } from "./BasemapToggle.jsx";
 import { SceneLegend } from "./SceneLegend.jsx";
+import { WeatherToggle } from "./WeatherToggle.jsx";
 
 type TripTab = "overview" | number;
 
@@ -58,6 +61,8 @@ export function TripPlannerView() {
   const rendererRef = useRef<MapRenderer | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [mapLoading, setMapLoading] = useState(true);
+  const [renderer, setRenderer] = useState<MapRenderer | null>(null);
+  const [weatherStatus, setWeatherStatus] = useState<WeatherStatus | null>(null);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [followUpLoading, setFollowUpLoading] = useState(false);
@@ -79,11 +84,17 @@ export function TripPlannerView() {
 
   useEffect(() => {
     if (!mapContainer.current) return;
-    const renderer = new MapRenderer(mapContainer.current, { onReady: () => setMapLoading(false) });
+    const renderer = new MapRenderer(mapContainer.current, {
+      onReady: () => setMapLoading(false),
+      onWeatherStatus: setWeatherStatus,
+    });
     rendererRef.current = renderer;
+    setRenderer(renderer);
     renderer.render(emptyScene());
     return () => {
       rendererRef.current = null;
+      setRenderer(null);
+      setWeatherStatus(null);
       renderer.destroy();
     };
   }, []);
@@ -348,7 +359,11 @@ export function TripPlannerView() {
             </div>
           )}
           <div ref={mapContainer} className="map-canvas" aria-label="Trip map" />
-          <SceneLegend scene={activeScene()} />
+          <div className="map-layer-toggles">
+            <BasemapToggle renderer={renderer} />
+            <WeatherToggle renderer={renderer} />
+          </div>
+          <SceneLegend scene={activeScene()} weatherStatus={weatherStatus} />
         </div>
         <div className="trip-panel">
           <div className="trip-section" style={{ flexShrink: 0 }}>

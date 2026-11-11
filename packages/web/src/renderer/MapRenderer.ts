@@ -1,4 +1,8 @@
 import type { Scene } from "@map-renderer/shared";
+import {
+  styleForBasemap,
+  type BasemapMode,
+} from "../map/basemaps.js";
 import { snippetForPlace } from "../map/sceneGuide.js";
 import {
   applyScene,
@@ -7,6 +11,7 @@ import {
   type MarkerFactories,
   type RenderedState,
 } from "./drawScene.js";
+import { WeatherOverlay, type WeatherStatus } from "./WeatherOverlay.js";
 
 import type { GeoJSON } from "geojson";
 import * as maplibregl from "maplibre-gl";
@@ -22,6 +27,7 @@ function escapeHtml(text: string): string {
 
 export interface MapRendererOptions {
   onReady?: () => void;
+  onWeatherStatus?: (status: WeatherStatus) => void;
 }
 
 export class MapRenderer {
@@ -46,9 +52,13 @@ export class MapRenderer {
       element.title = marker.name;
       element.addEventListener("click", () => {
         const detail = snippetForPlace(marker.name, this.narrative);
-        const body = detail
+        const weather = this.weatherEnabled
+          ? this.weather.formatPopupBlock(marker.name, marker.id)
+          : "";
+        const intro = detail
           ? `<strong>${escapeHtml(marker.name)}</strong><p style="margin:8px 0 0;font-size:13px;line-height:1.45">${escapeHtml(detail)}</p>`
           : `<strong>${escapeHtml(marker.name)}</strong>`;
+        const body = intro + weather;
         new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: "280px" })
           .setLngLat(marker.position)
           .setHTML(body)
@@ -74,6 +84,10 @@ export class MapRenderer {
 
   private isMapLoaded = false;
   private pendingScene: Scene | null = null;
+  private lastScene: Scene | null = null;
+  private basemapMode: BasemapMode = "light";
+  private weatherEnabled = false;
+  private readonly weather: WeatherOverlay;
 
   // Permanent India boundary layer
   private readonly indiaBoundarySourceId =
@@ -86,13 +100,13 @@ export class MapRenderer {
     this.map = new maplibregl.Map({
       container,
 
-      // Keep your normal basemap here.
-      style:
-        "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+      style: styleForBasemap(this.basemapMode),
 
       center: [77.2090, 28.6139],
       zoom: 5,
     });
+
+    this.weather = new WeatherOverlay(this.map, (status) => options?.onWeatherStatus?.(status));
 
     this.map.on("load", () => {
       this.isMapLoaded = true;
@@ -184,7 +198,42 @@ export class MapRenderer {
     this.narrative = text;
   }
 
+  public getBasemap(): BasemapMode {
+    return this.basemapMode;
+  }
+
+  public setWeatherEnabled(on: boolean): void {
+    this.weatherEnabled = on;
+    this.weather.setEnabled(on, this.lastScene);
+  }
+
+  public setBasemap(mode: BasemapMode): void {
+    if (mode === this.basemapMode) return;
+
+    this.basemapMode = mode;
+    if (this.current) {
+      disposeState(this.map, this.current);
+      this.current = null;
+    }
+    if (this.weatherEnabled) {
+      this.weather.clear();
+    }
+
+    this.map.setStyle(styleForBasemap(mode));
+    this.map.once("style.load", () => {
+      this.addIndiaBoundary();
+      if (this.lastScene) {
+        try {
+          this.render(this.lastScene);
+        } catch (error) {
+          console.error("Failed to re-render scene after basemap change", error);
+        }
+      }
+    });
+  }
+
   public render(scene: Scene): void {
+    this.lastScene = scene;
     if (!this.isMapLoaded) {
       this.pendingScene = scene;
       return;
@@ -198,9 +247,14 @@ export class MapRenderer {
       scene,
       this.generation
     );
+
+    if (this.weatherEnabled) {
+      void this.weather.sync(scene);
+    }
   }
 
   public destroy(): void {
+    this.weather.destroy();
     if (this.current) {
       disposeState(this.map, this.current);
       this.current = null;
