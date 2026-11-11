@@ -83,6 +83,10 @@ export class MapRenderer {
   };
 
   private isMapLoaded = false;
+  /** False while setStyle is swapping basemaps; render() is deferred until style.load. */
+  private styleReady = false;
+  /** Ignores stale style.load callbacks from an earlier basemap switch. */
+  private styleEpoch = 0;
   private pendingScene: Scene | null = null;
   private lastScene: Scene | null = null;
   private basemapMode: BasemapMode = "light";
@@ -110,6 +114,7 @@ export class MapRenderer {
 
     this.map.on("load", () => {
       this.isMapLoaded = true;
+      this.styleReady = true;
 
       // --------------------------------------------------
       // STEP 5:
@@ -211,6 +216,9 @@ export class MapRenderer {
     if (mode === this.basemapMode) return;
 
     this.basemapMode = mode;
+    this.styleReady = false;
+    const epoch = ++this.styleEpoch;
+
     if (this.current) {
       disposeState(this.map, this.current);
       this.current = null;
@@ -219,26 +227,36 @@ export class MapRenderer {
       this.weather.clear();
     }
 
-    this.map.setStyle(styleForBasemap(mode));
+    // Register before setStyle so a fast style.load (e.g. inline satellite JSON) is not missed.
     this.map.once("style.load", () => {
+      if (epoch !== this.styleEpoch) return;
+
+      this.styleReady = true;
       this.addIndiaBoundary();
-      if (this.lastScene) {
+
+      const scene = this.pendingScene ?? this.lastScene;
+      this.pendingScene = null;
+
+      if (scene) {
         try {
-          this.render(this.lastScene);
+          this.render(scene);
         } catch (error) {
           console.error("Failed to re-render scene after basemap change", error);
         }
       }
     });
+
+    this.map.setStyle(styleForBasemap(mode), { diff: false });
   }
 
   public render(scene: Scene): void {
     this.lastScene = scene;
-    if (!this.isMapLoaded) {
+    if (!this.isMapLoaded || !this.styleReady) {
       this.pendingScene = scene;
       return;
     }
 
+    this.pendingScene = null;
     this.generation += 1;
     this.current = applyScene(
       this.map,

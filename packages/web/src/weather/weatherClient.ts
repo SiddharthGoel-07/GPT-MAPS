@@ -14,11 +14,6 @@ function cacheKey(lat: number, lon: number): string {
   return `${lat.toFixed(2)},${lon.toFixed(2)}`;
 }
 
-function asArray<T>(value: T | T[] | undefined): T[] {
-  if (value === undefined) return [];
-  return Array.isArray(value) ? value : [value];
-}
-
 export async function fetchCurrentWeather(
   points: GeoPoint[],
   signal?: AbortSignal
@@ -50,23 +45,25 @@ export async function fetchCurrentWeather(
     const res = await fetch(url, init);
     if (!res.ok) throw new Error(`Weather request failed (${res.status})`);
 
-    const data = (await res.json()) as {
+    type ForecastBlock = {
       current?: {
-        temperature_2m?: number | number[];
-        weather_code?: number | number[];
-        wind_speed_10m?: number | number[];
+        temperature_2m?: number;
+        weather_code?: number;
+        wind_speed_10m?: number;
       };
     };
 
-    const temps = asArray(data.current?.temperature_2m);
-    const codes = asArray(data.current?.weather_code);
-    const winds = asArray(data.current?.wind_speed_10m);
+    const raw = (await res.json()) as ForecastBlock | ForecastBlock[];
+    const blocks = Array.isArray(raw) ? raw : [raw];
 
     toFetch.forEach((item, i) => {
+      const current = blocks[i]?.current;
+      if (!current) return;
+
       const reading: WeatherReading = {
-        temperature: Math.round(temps[i] ?? 0),
-        weatherCode: codes[i] ?? 0,
-        windSpeed: Math.round(winds[i] ?? 0),
+        temperature: Math.round(current.temperature_2m ?? 0),
+        weatherCode: current.weather_code ?? 0,
+        windSpeed: Math.round(current.wind_speed_10m ?? 0),
         fetchedAt: now,
       };
       cache.set(cacheKey(item.lat, item.lon), { reading, expires: now + CACHE_TTL_MS });

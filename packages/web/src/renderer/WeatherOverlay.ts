@@ -62,14 +62,24 @@ export class WeatherOverlay {
     else this.emit();
   }
 
-  public clear(): void {
-    this.abort?.abort();
-    this.abort = null;
+  private clearMarkers(): void {
     for (const row of this.rows) row.marker.remove();
     this.rows.length = 0;
     this.readings.clear();
+  }
+
+  public clear(): void {
+    this.abort?.abort();
+    this.abort = null;
+    this.clearMarkers();
     this.loading = false;
     this.updatedAt = null;
+  }
+
+  private finishSync(gen: number): void {
+    if (gen !== this.fetchGen) return;
+    this.loading = false;
+    this.emit();
   }
 
   public destroy(): void {
@@ -88,10 +98,10 @@ export class WeatherOverlay {
     const label = wmoToLabel(r.weatherCode);
     const ago = formatAgo(r.fetchedAt);
     return (
-      `<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e5e7eb;font-size:13px;line-height:1.45">` +
+      `<div class="map-popup-weather">` +
       `<strong>Now</strong> · ${emoji} ${escapeHtml(label)}<br>` +
       `${r.temperature}°C · 💨 ${r.windSpeed} km/h<br>` +
-      `<span style="color:#6b7280;font-size:12px">Updated ${escapeHtml(ago)}</span>` +
+      `<span class="map-popup-weather-updated">Updated ${escapeHtml(ago)}</span>` +
       `</div>`
     );
   }
@@ -129,8 +139,7 @@ export class WeatherOverlay {
     const gen = ++this.fetchGen;
 
     const targets = this.targetsFromScene(scene);
-    this.clear();
-    this.enabled = true;
+    this.clearMarkers();
     this.loading = true;
     this.emit();
 
@@ -161,7 +170,10 @@ export class WeatherOverlay {
     try {
       const points = targets.map((t) => ({ lat: t.position[1], lon: t.position[0] }));
       const readings = await fetchCurrentWeather(points, controller.signal);
-      if (gen !== this.fetchGen || controller.signal.aborted) return;
+      if (gen !== this.fetchGen || controller.signal.aborted) {
+        this.finishSync(gen);
+        return;
+      }
 
       readings.forEach((reading, i) => {
         const row = this.rows[i];
@@ -174,7 +186,10 @@ export class WeatherOverlay {
       this.loading = false;
       this.emit();
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        this.finishSync(gen);
+        return;
+      }
       console.warn("Weather fetch failed", error);
       for (const row of this.rows) {
         row.element.classList.remove("weather-badge--loading");

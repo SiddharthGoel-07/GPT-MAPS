@@ -1,6 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { SceneValidationError, emptyScene, parseScene, type Scene } from "@map-renderer/shared";
+
+import {
+  clearActiveMap,
+  listSavedMaps,
+  loadActiveMap,
+  saveMap,
+  writeActiveMapId,
+  type SavedMapRecord,
+} from "../map/savedMaps.js";
 
 import {
   ChatRequestError,
@@ -10,9 +19,9 @@ import {
 } from "../chat/chatClient.js";
 import { MapRenderer } from "../renderer/MapRenderer.js";
 import type { WeatherStatus } from "../renderer/WeatherOverlay.js";
+import { useMapRendererContext } from "../mapRendererContext.jsx";
 import { BasemapToggle } from "./BasemapToggle.jsx";
 import { SceneLegend } from "./SceneLegend.jsx";
-import { WeatherToggle } from "./WeatherToggle.jsx";
 
 const EXAMPLE_PROMPTS = [
   "Show Delhi, Mumbai, and Bangalore",
@@ -34,7 +43,15 @@ export function MapView() {
   const [renderer, setRenderer] = useState<MapRenderer | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus | null>(null);
   const [retryPrompt, setRetryPrompt] = useState<string | null>(null);
-  const conversation = useRef<{ id: string; started: boolean }>({ id: newConversationId(), started: false });
+  const conversation = useRef<{ id: string; started: boolean; firstPrompt: string }>({
+    id: newConversationId(),
+    started: false,
+    firstPrompt: "",
+  });
+  const restoredRef = useRef(false);
+  const [savedMaps, setSavedMaps] = useState<SavedMapRecord[]>(() => listSavedMaps());
+  const [activeMapId, setActiveMapId] = useState<string | undefined>(() => loadActiveMap()?.id);
+  const { setRenderer: setSharedRenderer } = useMapRendererContext();
 
   const AI_SERVER_URL = import.meta.env.VITE_AI_SERVER_URL || "";
   const AUTH_TOKEN = import.meta.env.VITE_AI_AUTH_TOKEN || undefined;
@@ -48,14 +65,70 @@ export function MapView() {
     });
     rendererRef.current = renderer;
     setRenderer(renderer);
+    setSharedRenderer(renderer);
 
     return () => {
       rendererRef.current = null;
       setRenderer(null);
+      setSharedRenderer(null);
       setWeatherStatus(null);
       renderer.destroy();
     };
+  }, [setSharedRenderer]);
+
+  const applyMapRecord = useCallback((record: SavedMapRecord) => {
+    const nextScene = parseScene(record.scene);
+    conversation.current = {
+      id: record.conversationId,
+      started: true,
+      firstPrompt: record.originalPrompt,
+    };
+    rendererRef.current?.setNarrative(record.narrative);
+    rendererRef.current?.render(nextScene);
+    setScene(nextScene);
+    setNarrative(record.narrative);
+    setStatusMessage("");
+    setRetryPrompt(null);
+    writeActiveMapId(record.id);
+    setActiveMapId(record.id);
   }, []);
+
+  useEffect(() => {
+    if (mapLoading || !rendererRef.current || restoredRef.current) return;
+    restoredRef.current = true;
+    const active = loadActiveMap();
+    if (!active) return;
+    try {
+      const nextScene = parseScene(active.scene);
+      if (nextScene.objects.length === 0) return;
+      applyMapRecord(active);
+    } catch (error) {
+      console.warn("Failed to restore saved map", error);
+      clearActiveMap();
+    }
+  }, [applyMapRecord, mapLoading]);
+
+  const persistScene = (nextScene: Scene, reply: string, promptText: string) => {
+    if (nextScene.objects.length === 0) {
+      clearActiveMap();
+      setActiveMapId(undefined);
+      setSavedMaps(listSavedMaps());
+      return;
+    }
+    if (!conversation.current.firstPrompt) {
+      conversation.current.firstPrompt = promptText;
+    }
+    const entry = saveMap({
+      id: conversation.current.id,
+      originalPrompt: conversation.current.firstPrompt,
+      narrative: reply,
+      conversationId: conversation.current.id,
+      scene: nextScene,
+    });
+    writeActiveMapId(entry.id);
+    setActiveMapId(entry.id);
+    setSavedMaps(listSavedMaps());
+  };
 
   const runPrompt = async (text: string) => {
     const trimmed = text.trim();
@@ -90,6 +163,7 @@ export function MapView() {
       setScene(nextScene);
       conversation.current.started = true;
       setNarrative(reply);
+      persistScene(nextScene, reply, trimmed);
       setPrompt("");
     } catch (err) {
       if (controller.signal.aborted) {
@@ -123,17 +197,37 @@ export function MapView() {
     abortRef.current?.abort();
   };
 
-  const handleNewMap = async () => {
+  const handleClear = () => {
     if (loading) return;
-    const old = conversation.current;
-    conversation.current = { id: newConversationId(), started: false };
     rendererRef.current?.render(emptyScene());
+    rendererRef.current?.setNarrative("");
     setScene(null);
     setNarrative("");
     setStatusMessage("");
     setRetryPrompt(null);
+    clearActiveMap();
+    setActiveMapId(undefined);
+  };
+
+  const handleLoadHistory = (id: string) => {
+    if (!id || loading) return;
+    const record = savedMaps.find((m) => m.id === id);
+    if (!record) return;
+    try {
+      applyMapRecord(record);
+    } catch (error) {
+      console.error(error);
+      setStatusMessage("That saved map could not be restored.");
+    }
+  };
+
+  const handleNewMap = async () => {
+    if (loading) return;
+    const old = conversation.current;
+    conversation.current = { id: newConversationId(), started: false, firstPrompt: "" };
+    handleClear();
     setPrompt("");
-    rendererRef.current?.setNarrative("");
+    clearActiveMap();
     if (old.started) {
       await endConversation({ baseUrl: AI_SERVER_URL, conversationId: old.id, authToken: AUTH_TOKEN });
     }
@@ -166,13 +260,48 @@ export function MapView() {
           <button
             type="button"
             className="btn"
+            onClick={handleClear}
+            disabled={loading || scene === null}
+            title="Remove all markers and shapes from the map"
+          >
+            Clear
+          </button>
+          <button
+            type="button"
+            className="btn"
             onClick={handleNewMap}
             disabled={loading}
-            title="Clear the map and start a new one"
+            title="Clear the map and start a new conversation"
           >
             New map
           </button>
         </form>
+
+        {savedMaps.length > 0 && (
+          <div
+            className="floating-bar map-history-bar"
+            style={{ maxWidth: 760, width: "100%", margin: "0 auto", alignItems: "center" }}
+          >
+            <label className="muted map-history-label" htmlFor="map-history-select">
+              History
+            </label>
+            <select
+              id="map-history-select"
+              className="field"
+              style={{ flex: 1, minWidth: 0 }}
+              value={activeMapId ?? ""}
+              disabled={loading}
+              onChange={(e) => handleLoadHistory(e.target.value)}
+            >
+              <option value="">Open a saved map…</option>
+              {savedMaps.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {showExamples && (
           <div className="floating-examples" aria-label="Example prompts">
@@ -217,7 +346,6 @@ export function MapView() {
         <div ref={mapContainer} className="map-canvas" aria-label="Interactive map" />
         <div className="map-layer-toggles">
           <BasemapToggle renderer={renderer} />
-          <WeatherToggle renderer={renderer} />
         </div>
         <SceneLegend scene={scene} weatherStatus={weatherStatus} />
       </div>
