@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
+  inferGeoHint,
   qualifyPlaceForGeocoding,
   sanitizeOverviewPlaces,
   sanitizePlaces,
@@ -46,6 +47,16 @@ describe("qualifyPlaceForGeocoding", () => {
     assert.equal(
       qualifyPlaceForGeocoding("Spice Plantation", "India", stops),
       "Spice Plantation, Goa, India"
+    );
+  });
+
+  test("Mathura Junction uses UP hint on a Delhi–Mathura trip (not Delhi)", () => {
+    const ctx =
+      "Delhi to Mathura-Vrindavan Day 2: temples in Vrindavan, return via Mathura Junction";
+    const stops = ["Hotel Dev Palace, Mathura", "Banke Bihari Temple, Vrindavan"];
+    assert.equal(
+      qualifyPlaceForGeocoding("Mathura Junction", inferGeoHint(stops, ctx), stops, ctx),
+      "Mathura Junction, Mathura, Uttar Pradesh, India"
     );
   });
 

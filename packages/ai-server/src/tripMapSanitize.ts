@@ -22,6 +22,9 @@ export function inferGeoHint(stops: readonly string[], userPrompt = ""): string 
     return "Kerala, India";
   }
   if (/\bmumbai\b|\bbombay\b|maharashtra/.test(blob)) return "Maharashtra, India";
+  if (/\bmathura\b|\bvrindavan\b|\bgovardhan\b|\bbraj\b/.test(blob)) {
+    return "Mathura, Uttar Pradesh, India";
+  }
   if (/\bdelhi\b|ncr|gurgaon|noida/.test(blob)) return "Delhi, India";
   if (/\bkarnataka\b|bangalore|bengaluru|mysore/.test(blob)) return "Karnataka, India";
   if (/\btamil nadu\b|chennai|madurai/.test(blob)) return "Tamil Nadu, India";
@@ -58,9 +61,20 @@ export function qualifyPlaceForGeocoding(
     return `${trimmed}, ${region}`;
   }
   if (VAGUE_POI_GEOCODE.test(n) && !/\b(city|district)\b/.test(n)) {
-    return `${trimmed}, ${hint}`;
+    const region = regionalHintForVaguePoi(n, blob, hint);
+    return `${trimmed}, ${region}`;
   }
   return trimmed;
+}
+
+/** Prefer the day’s cities over trip-wide hints (e.g. Delhi title + Mathura day stops). */
+function regionalHintForVaguePoi(placeName: string, blob: string, fallback: string): string {
+  if (/\bmathura\b/.test(placeName)) return "Mathura, Uttar Pradesh, India";
+  if (/\bvrindavan\b/.test(placeName)) return "Vrindavan, Uttar Pradesh, India";
+  if (/\bgovardhan\b/.test(placeName)) return "Govardhan, Uttar Pradesh, India";
+  if (/\bvrindavan\b/.test(blob)) return "Vrindavan, Uttar Pradesh, India";
+  if (/\bmathura\b|\bgovardhan\b/.test(blob)) return "Mathura, Uttar Pradesh, India";
+  return fallback;
 }
 
 export function isVaguePoiName(name: string): boolean {

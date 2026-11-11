@@ -149,7 +149,7 @@ async function buildScene(
     throwIfAborted(signal);
     const query = geocode(location);
     log?.(`[trip] marker: ${query}`);
-    await mcp.callTool("createMarker", { location: query }, signal);
+    await mcp.callTool("createMarker", { location: query, forceDistinct: true }, signal);
   }
   if (drawPaths) {
     for (const route of paths) {

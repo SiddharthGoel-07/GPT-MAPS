@@ -77,6 +77,21 @@ function fontWeight(value: string | undefined, notes: string[]): string | undefi
 
 const coordKey = (p: LngLat): string => `${p[1].toFixed(4)},${p[0].toFixed(4)}`;
 const markerKey = (p: LngLat): string => `marker:${coordKey(p)}`;
+
+const COLLOCATE_STEP = 0.00012; // ~13 m latitude per step
+
+function offsetColocated(point: LngLat, step: number): LngLat {
+  return [point[0] + COLLOCATE_STEP * step, point[1] + COLLOCATE_STEP * step * 0.35];
+}
+
+function resolveMarkerPoint(ctx: RequestContext, point: LngLat, forceDistinct: boolean): LngLat {
+  if (!forceDistinct || !ctx.keys.has(markerKey(point))) return point;
+  for (let step = 1; step < 24; step++) {
+    const candidate = offsetColocated(point, step);
+    if (!ctx.keys.has(markerKey(candidate))) return candidate;
+  }
+  return point;
+}
 const labelKey = (p: LngLat): string => `label:${coordKey(p)}`;
 const pathKey = (a: LngLat, b: LngLat): string => `path:${coordKey(a)}->${coordKey(b)}`;
 const polygonKey = (polygons: LngLat[][][]): string => {
@@ -182,11 +197,14 @@ export interface MarkerInput {
   style?: { color?: string | undefined; size?: number | undefined; opacity?: number | undefined } | undefined;
   label?: string | undefined;
   showLabel?: boolean | undefined;
+  /** Trip maps: nudge pin if another stop shares the same geocoded point. */
+  forceDistinct?: boolean | undefined;
 }
 
 export function addMarker(ctx: RequestContext, location: string, point: LngLat, input: MarkerInput): string {
   const notes: string[] = [];
-  const key = markerKey(point);
+  const resolved = resolveMarkerPoint(ctx, point, input.forceDistinct === true);
+  const key = markerKey(resolved);
   const markerExists = ctx.keys.has(key);
 
   let plan: LabelPlan | null = null;
@@ -194,7 +212,7 @@ export function addMarker(ctx: RequestContext, location: string, point: LngLat, 
   if (input.showLabel !== false) {
     const explicit = input.label !== undefined;
     text = labelText(explicit ? (input.label as string) : location, notes);
-    plan = planLabel(ctx, point, text, explicit);
+    plan = planLabel(ctx, resolved, text, explicit);
   }
 
   const adding = (markerExists ? 0 : 1) + (plan?.action === "create" ? 1 : 0);
@@ -204,11 +222,14 @@ export function addMarker(ctx: RequestContext, location: string, point: LngLat, 
   if (markerExists) {
     parts.push(`Marker for "${location}" already exists; not duplicated.`);
   } else {
+    if (resolved[0] !== point[0] || resolved[1] !== point[1]) {
+      notes.push(`nudged marker slightly so "${location}" is visible beside another stop at the same coordinates`);
+    }
     const marker: MarkerObject = {
       type: "marker",
       id: crypto.randomUUID(),
       name: name(location),
-      position: point,
+      position: resolved,
       color: color(input.style?.color, "#ff0000", "marker color", notes),
       opacity: clamp(input.style?.opacity, 0, 1, "opacity", notes) ?? 1,
       size: clamp(input.style?.size, 0.4, 1.5, "size", notes) ?? 1,
@@ -219,7 +240,7 @@ export function addMarker(ctx: RequestContext, location: string, point: LngLat, 
   }
 
   if (plan) {
-    applyLabel(ctx, plan, point, location, text, undefined, notes);
+    applyLabel(ctx, plan, resolved, location, text, undefined, notes);
     if (plan.action === "create") parts.push(`Added label "${text}".`);
     else if (plan.action === "replace") parts.push(`Updated label to "${text}".`);
   }

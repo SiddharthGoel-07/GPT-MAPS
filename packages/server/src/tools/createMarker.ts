@@ -24,6 +24,7 @@ export function registerCreateMarkerTool(
         location: z.string().trim().min(1).max(200),
         label: z.string().max(200).optional(),
         showLabel: z.boolean().optional(),
+        forceDistinct: z.boolean().optional(),
         style: z
           .object({
             color: z.string().optional(),
@@ -34,12 +35,12 @@ export function registerCreateMarkerTool(
       }),
     },
 
-    async ({ location, label, showLabel, style }) => {
+    async ({ location, label, showLabel, forceDistinct, style }) => {
       const place = await geocodingService.resolve(location);
 
       // No await between the duplicate check and the insert inside addMarker.
       const text =
-        `${addMarker(context, location, place.point, { label, showLabel, style })} ${describePlace(location, place)}`;
+        `${addMarker(context, location, place.point, { label, showLabel, forceDistinct, style })} ${describePlace(location, place)}`;
 
       return { content: [{ type: "text", text }] };
     }
