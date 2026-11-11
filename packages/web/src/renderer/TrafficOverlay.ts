@@ -4,6 +4,7 @@ import * as maplibregl from "maplibre-gl";
 import {
   fetchTrafficPathSegments,
   pathsFromScene,
+  type TrafficPathSegment,
   type TrafficStatus,
 } from "../traffic/trafficClient.js";
 
@@ -20,6 +21,8 @@ export class TrafficOverlay {
   private fetchGen = 0;
   private abort: AbortController | null = null;
   private authToken: string | undefined;
+  private cachedSegments: TrafficPathSegment[] | null = null;
+  private cachedSceneKey: string | null = null;
 
   constructor(
     private readonly map: maplibregl.Map,
@@ -52,9 +55,16 @@ export class TrafficOverlay {
     this.abort?.abort();
     this.abort = null;
     this.removePathLayer();
+    this.cachedSegments = null;
+    this.cachedSceneKey = null;
     this.loading = false;
     this.pathCount = 0;
     this.error = undefined;
+  }
+
+  /** Drop MapLibre layers after setStyle(); keep fetched segment data. */
+  public detachForStyleSwap(): void {
+    this.removePathLayer();
   }
 
   public destroy(): void {
@@ -72,41 +82,60 @@ export class TrafficOverlay {
     void this.sync(scene);
   }
 
-  /** Re-attach TomTom layers after setStyle(). */
+  /** Re-attach TomTom layers after setStyle() without refetching. */
   public onStyleReady(scene: Scene | null): void {
     if (!this.enabled) return;
-    void this.sync(scene);
+    void this.sync(scene, { allowCache: true });
   }
 
-  public async sync(scene: Scene | null): Promise<void> {
+  public async sync(scene: Scene | null, options?: { allowCache?: boolean }): Promise<void> {
     if (!this.enabled) return;
+
+    if (!scene) {
+      this.detachForStyleSwap();
+      this.pathCount = 0;
+      this.loading = false;
+      this.emit();
+      return;
+    }
+
+    const paths = pathsFromScene(scene);
+    this.pathCount = paths.length;
+    const sceneKey = trafficSceneKey(scene);
+
+    if (
+      options?.allowCache !== false &&
+      sceneKey === this.cachedSceneKey &&
+      this.cachedSegments &&
+      this.cachedSegments.length > 0
+    ) {
+      this.detachForStyleSwap();
+      this.paintSegments(this.cachedSegments);
+      this.loading = false;
+      this.error = undefined;
+      this.emit();
+      return;
+    }
 
     this.abort?.abort();
     const controller = new AbortController();
     this.abort = controller;
     const gen = ++this.fetchGen;
 
-    this.clearMarkersOnly();
+    this.detachForStyleSwap();
     this.loading = true;
     this.error = undefined;
     this.emit();
 
-    if (!scene) {
+    if (paths.length === 0) {
+      this.cachedSegments = null;
+      this.cachedSceneKey = sceneKey;
       this.loading = false;
       this.emit();
       return;
     }
 
     try {
-      const paths = pathsFromScene(scene);
-      this.pathCount = paths.length;
-
-      if (paths.length === 0) {
-        this.loading = false;
-        this.emit();
-        return;
-      }
-
       const segments = await fetchTrafficPathSegments(paths, this.authToken, controller.signal);
       if (gen !== this.fetchGen || controller.signal.aborted) {
         if (gen === this.fetchGen) {
@@ -116,38 +145,9 @@ export class TrafficOverlay {
         return;
       }
 
-      const features = segments.map((seg, index) => ({
-        type: "Feature" as const,
-        geometry: {
-          type: "LineString" as const,
-          coordinates: seg.coordinates,
-        },
-        properties: {
-          color: seg.color,
-          pathId: seg.pathId,
-          index,
-        },
-      }));
-
-      this.map.addSource(PATH_SOURCE_ID, {
-        type: "geojson",
-        data: { type: "FeatureCollection", features },
-      });
-
-      this.map.addLayer({
-        id: PATH_LAYER_ID,
-        type: "line",
-        source: PATH_SOURCE_ID,
-        layout: {
-          "line-cap": "round",
-          "line-join": "round",
-        },
-        paint: {
-          "line-color": ["get", "color"],
-          "line-width": 8,
-          "line-opacity": 0.92,
-        },
-      });
+      this.cachedSegments = segments;
+      this.cachedSceneKey = sceneKey;
+      this.paintSegments(segments);
 
       this.loading = false;
       this.emit();
@@ -166,7 +166,53 @@ export class TrafficOverlay {
     }
   }
 
-  private clearMarkersOnly(): void {
-    this.removePathLayer();
+  private paintSegments(segments: TrafficPathSegment[]): void {
+    const features = segments.map((seg, index) => ({
+      type: "Feature" as const,
+      geometry: {
+        type: "LineString" as const,
+        coordinates: seg.coordinates,
+      },
+      properties: {
+        color: seg.color,
+        pathId: seg.pathId,
+        index,
+      },
+    }));
+
+    this.map.addSource(PATH_SOURCE_ID, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features },
+    });
+
+    this.map.addLayer({
+      id: PATH_LAYER_ID,
+      type: "line",
+      source: PATH_SOURCE_ID,
+      layout: {
+        "line-cap": "round",
+        "line-join": "round",
+      },
+      paint: {
+        "line-color": ["get", "color"],
+        "line-width": 8,
+        "line-opacity": 0.92,
+      },
+    });
   }
+}
+
+function trafficSceneKey(scene: Scene): string {
+  const parts: string[] = [];
+  for (const object of scene.objects) {
+    if (object.type !== "path") continue;
+    const c = object.coordinates;
+    const first = c[0];
+    const last = c[c.length - 1];
+    parts.push(
+      `${object.id}:${c.length}:${first?.[0] ?? ""},${first?.[1] ?? ""}:${last?.[0] ?? ""},${last?.[1] ?? ""}`
+    );
+  }
+  parts.sort();
+  return parts.join("|");
 }
