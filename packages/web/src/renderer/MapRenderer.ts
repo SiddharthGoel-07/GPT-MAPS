@@ -116,6 +116,8 @@ export class MapRenderer {
     });
 
     this.weather = new WeatherOverlay(this.map, (status) => options?.onWeatherStatus?.(status));
+    // WeatherOverlay starts disabled; match renderer default (weather on).
+    this.weather.setEnabled(this.weatherEnabled, null);
     this.traffic = new TrafficOverlay(
       this.map,
       (status) => options?.onTrafficStatus?.(status),

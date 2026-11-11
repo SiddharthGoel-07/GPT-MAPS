@@ -45,3 +45,14 @@ export function pathMidpoint(coordinates: readonly LngLat[]): LngLat | null {
   if (coordinates.length === 0) return null;
   return coordinates[Math.floor(coordinates.length / 2)]!;
 }
+
+/** Evenly spaced points along a polyline (endpoints always kept). */
+export function samplePolyline<T extends LngLat>(coordinates: readonly T[], maxSamples: number): T[] {
+  if (maxSamples < 2 || coordinates.length <= maxSamples) return [...coordinates];
+  const picked: T[] = [];
+  for (let i = 0; i < maxSamples; i++) {
+    const index = Math.round((i / (maxSamples - 1)) * (coordinates.length - 1));
+    picked.push(coordinates[index]!);
+  }
+  return picked;
+}

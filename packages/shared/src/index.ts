@@ -46,6 +46,7 @@ export {
   formatDurationSeconds,
   pathMidpoint,
   polylineLengthMeters,
+  samplePolyline,
 } from "./geo.js";
 export {
   TRAFFIC_SCALE,
