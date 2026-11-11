@@ -20,14 +20,50 @@ Turn map questions into live graphics. You chat in plain language; a **Groq**-po
 
 ---
 
-## How it fits together
+## Architecture
 
-```text
-Browser (React)  →  ai-server :3002  →  Groq + tool loop
-                         ↓
-                   server :3001 /mcp  →  scene (shared schema)
-                         ↓
-                   web MapRenderer  →  MapLibre GL
+```mermaid
+flowchart TB
+  subgraph client["Browser :5173"]
+    UI["React UI<br/>Map queries · Trip planner"]
+    MR["MapRenderer<br/>MapLibre GL"]
+    UI --> MR
+  end
+
+  subgraph ai["ai-server :3002"]
+    API["/api/chat · /api/trip"]
+    Loop["Groq LLM + tool loop"]
+    API --> Loop
+  end
+
+  subgraph mcp["server :3001"]
+    MCP["MCP HTTP /mcp"]
+    Tools["createMarker · createPath · … · renderScene"]
+    Scene[("Scene per session")]
+    MCP --> Tools --> Scene
+  end
+
+  subgraph shared["@map-renderer/shared"]
+    Schema["Scene schema · trip models"]
+  end
+
+  subgraph external["External APIs"]
+    NOM["Nominatim"]
+    OSRM["OSRM"]
+    GROQ["Groq API"]
+  end
+
+  UI -->|"POST /api/*"| API
+  Loop --> GROQ
+  Loop -->|"MCP tool calls"| MCP
+  Tools --> NOM
+  Tools --> OSRM
+  Scene -->|"scene JSON"| Loop
+  Loop -->|"scene JSON"| API
+  API -->|"scene JSON"| MR
+  Schema -.-> Scene
+  Schema -.-> MR
+  Schema -.-> API
 ```
 
 | Package | Responsibility |
