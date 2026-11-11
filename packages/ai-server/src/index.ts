@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, type Server } from "node:http";
 import { runChat, validatePrompt } from "./chatLoop.js";
 import type { ChatResult, McpLike } from "./chatLoop.js";
 import { readConversationConfig, readLimits, readServerConfig } from "./config.js";
@@ -12,6 +12,7 @@ import { describeMap } from "./mapContext.js";
 import { connectMcp } from "./mcp.js";
 import { SYSTEM_PROMPT } from "./prompt.js";
 import { RateLimiter, applyCors, checkToken, readBodyLimited } from "./security.js";
+import { buildTrafficPathSegments, proxyTrafficTile, readTomTomApiKey } from "./tomtomTraffic.js";
 
 /*
  * GROQ API KEYS (in .env): GROQ_API_KEY_1 ... GROQ_API_KEY_5
@@ -40,6 +41,7 @@ if (!MCP_SERVER_URL) {
 }
 
 const MODEL = process.env.GROQ_MODEL ?? "openai/gpt-oss-20b";
+console.log(`[AI] Model: ${MODEL}`);
 const limits = readLimits();
 const serverConfig = readServerConfig();
 const conversationConfig = readConversationConfig();
@@ -304,15 +306,77 @@ const httpServer = createHttpServer(async (req, res) => {
       return;
     }
 
+    const trafficTileMatch = /^\/api\/traffic\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$/.exec(path);
+    if (req.method === "GET" && trafficTileMatch) {
+      const apiKey = readTomTomApiKey();
+      if (!apiKey) {
+        sendJson(res, 503, { error: "TomTom API key is not configured." });
+        return;
+      }
+      await proxyTrafficTile(res, trafficTileMatch[1]!, trafficTileMatch[2]!, trafficTileMatch[3]!, apiKey);
+      return;
+    }
+
     const isApi =
       path === "/api/chat" ||
       path === "/api/trip" ||
       path === "/api/trip/followup" ||
+      path === "/api/traffic/paths" ||
       path.startsWith("/api/conversations/");
     if (!isApi) return sendJson(res, 404, { error: "Not found" });
 
     const tokenProblem = checkToken(req, serverConfig);
     if (tokenProblem) return sendError(res, tokenProblem);
+
+    if (req.method === "POST" && path === "/api/traffic/paths") {
+      const apiKey = readTomTomApiKey();
+      if (!apiKey) throw new ChatError(503, "TomTom API key is not configured.");
+
+      const trafficBodyLimit = Math.max(serverConfig.maxBodyBytes, 256 * 1024);
+      const controller = new AbortController();
+      res.on("close", () => {
+        if (!res.writableEnded && !controller.signal.aborted) {
+          controller.abort(new Error("client disconnected"));
+        }
+      });
+
+      const raw = await readBodyLimited(req, trafficBodyLimit);
+      let body: { paths?: unknown };
+      try {
+        const parsed: unknown = JSON.parse(raw.toString("utf-8"));
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+        body = parsed as { paths?: unknown };
+      } catch {
+        throw new ChatError(400, "Request body must be a JSON object.");
+      }
+
+      if (!Array.isArray(body.paths)) {
+        throw new ChatError(400, "paths must be an array.");
+      }
+
+      const paths = body.paths
+        .filter((p): p is { id: string; coordinates: [number, number][] } => {
+          if (typeof p !== "object" || p === null) return false;
+          const row = p as { id?: unknown; coordinates?: unknown };
+          return typeof row.id === "string" && Array.isArray(row.coordinates);
+        })
+        .map((p) => ({
+          id: p.id,
+          coordinates: p.coordinates.filter(
+            (c): c is [number, number] =>
+              Array.isArray(c) &&
+              c.length === 2 &&
+              typeof c[0] === "number" &&
+              typeof c[1] === "number"
+          ),
+        }))
+        .filter((p) => p.coordinates.length >= 2);
+
+      const segments = await buildTrafficPathSegments(paths, apiKey, controller.signal);
+      if (controller.signal.aborted) return;
+      sendJson(res, 200, { segments });
+      return;
+    }
 
     if (req.method === "DELETE" && path.startsWith("/api/conversations/")) {
       // "New map": ends the conversation and its MCP session. Idempotent.
@@ -509,15 +573,72 @@ const httpServer = createHttpServer(async (req, res) => {
 const port = Number(process.env.PORT) || 3002;
 const host = serverConfig.host;
 
-httpServer.listen(port, host, () => {
-  console.error(`AI Server listening on http://${host}:${port}`);
-  console.error(`[security] allowed origins: ${serverConfig.allowedOrigins.join(", ")}`);
-  if (serverConfig.authToken === undefined && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
-    console.error("[security] WARNING: listening beyond this machine without AUTH_TOKEN.");
-  }
-});
+const AI_HTTP_SERVER = Symbol.for("@map-renderer/ai-server.http");
+
+type GlobalWithAiServer = typeof globalThis & { [AI_HTTP_SERVER]?: Server };
+
+function closeHttpServer(server: Server): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (): void => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    server.close(() => done());
+    server.closeAllConnections?.();
+    setTimeout(done, 1500).unref();
+  });
+}
+
+async function releaseListenSlot(): Promise<void> {
+  const g = globalThis as GlobalWithAiServer;
+  const previous = g[AI_HTTP_SERVER];
+  if (!previous) return;
+  delete g[AI_HTTP_SERVER];
+  await closeHttpServer(previous);
+}
+
+void (async () => {
+  await releaseListenSlot();
+  const g = globalThis as GlobalWithAiServer;
+  g[AI_HTTP_SERVER] = httpServer;
+
+  const tryListen = (retryMs: number): void => {
+    httpServer.once("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE" && retryMs > 0) {
+        console.error(
+          `[AI] Port ${port} busy, retrying in ${retryMs}ms… (use one dev stack — do not run \`npm run dev:ai\` alongside root \`npm run dev\`)`
+        );
+        setTimeout(() => tryListen(Math.floor(retryMs / 2)), retryMs);
+        return;
+      }
+      if (err.code === "EADDRINUSE") {
+        console.error(
+          `[AI] Port ${port} is already in use. Run only one dev stack (root \`npm run dev\`) and detach the debugger if ai-server will not restart.`
+        );
+        process.exit(1);
+      }
+      console.error("[AI] HTTP server error:", err);
+      process.exit(1);
+    });
+
+    httpServer.listen(port, host, () => {
+      console.error(`AI Server listening on http://${host}:${port}`);
+      if (readTomTomApiKey()) console.error("[tomtom] TOMTOM_API_KEY is set (traffic API enabled).");
+      else console.error("[tomtom] TOMTOM_API_KEY is not set (live traffic disabled).");
+      console.error(`[security] allowed origins: ${serverConfig.allowedOrigins.join(", ")}`);
+      if (serverConfig.authToken === undefined && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+        console.error("[security] WARNING: listening beyond this machine without AUTH_TOKEN.");
+      }
+    });
+  };
+
+  tryListen(800);
+})();
 
 async function shutdown(): Promise<void> {
+  await closeHttpServer(httpServer);
   // Give open MCP sessions a chance to end cleanly, but never hang.
   await Promise.race([store.closeAll(), new Promise<void>((r) => setTimeout(r, 3000).unref())]);
   process.exit(0);

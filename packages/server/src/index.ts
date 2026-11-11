@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
@@ -8,6 +9,7 @@ import {
 import type { McpServer } from "@modelcontextprotocol/server";
 import { createServer } from "./server.js";
 import { BodyTooLargeError, checkRequest, readBodyLimited, readGuardConfig } from "./httpGuard.js";
+import { readTomTomApiKey } from "./tomtomConfig.js";
 
 /*
  * Session model: one MCP session = one McpServer = one Scene.
@@ -206,4 +208,6 @@ const host = guard.host;
 httpServer.listen(port, host, () => {
   console.error(`Map Renderer MCP Server listening on http://${host}:${port}/mcp`);
   if (guard.authToken === undefined) console.error("[security] MCP_AUTH_TOKEN is not set: no authentication.");
+  if (readTomTomApiKey()) console.error("[tomtom] TOMTOM_API_KEY is set.");
+  else console.error("[tomtom] TOMTOM_API_KEY is not set (TomTom routing/traffic disabled).");
 });

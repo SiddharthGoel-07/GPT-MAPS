@@ -9,6 +9,13 @@ import { validatePrompt } from "./chatLoop.js";
 import type { JsonLlm } from "./groq.js";
 import { budgetBreakdownSchema, type BudgetBreakdown } from "@map-renderer/shared";
 import { TRIP_FOLLOWUP_SYSTEM_PROMPT, TRIP_JSON_SYSTEM_PROMPT, type TripDayDraft, type TripPlanDraft } from "./tripPrompt.js";
+import {
+  inferGeoHint,
+  qualifyPlaceForGeocoding,
+  sanitizeOverviewPlaces,
+  sanitizePlaces,
+  sanitizeTripRoutes,
+} from "./tripMapSanitize.js";
 
 export interface TripPlanResult {
   tripTitle: string;
@@ -102,25 +109,56 @@ function parseFollowUpDraft(raw: string): FollowUpDraft {
   };
 }
 
+function mapStops(
+  places: readonly string[],
+  routes: readonly { start: string; end: string }[] | undefined
+): { places: string[]; routes: Array<{ start: string; end: string }> } {
+  const stops = sanitizePlaces(places);
+  const paths = sanitizeTripRoutes(stops, routes);
+  return { places: stops, routes: paths };
+}
+
+interface BuildSceneOptions {
+  drawPaths?: boolean;
+  geoHint?: string;
+  userPrompt?: string;
+  /** Day title + narrative; anchors vague POI names (e.g. "City Palace" → Jaipur). */
+  sectionContext?: string;
+}
+
 async function buildScene(
   mcp: McpLike,
   places: readonly string[],
-  routes: readonly { start: string; end: string }[],
+  routes: readonly { start: string; end: string }[] | undefined,
   signal: AbortSignal,
-  log?: (m: string) => void
+  log?: (m: string) => void,
+  options?: BuildSceneOptions
 ): Promise<Scene> {
   throwIfAborted(signal);
+  const drawPaths = options?.drawPaths !== false;
+  const { places: stops, routes: paths } = mapStops(places, routes);
+  const contextBlob = `${options?.userPrompt ?? ""} ${options?.sectionContext ?? ""}`.trim();
+  const geoHint = options?.geoHint ?? inferGeoHint(stops, contextBlob);
+  const sectionContext = options?.sectionContext ?? "";
   await mcp.callTool("clearScene", {}, signal);
 
-  for (const location of places) {
+  const geocode = (location: string): string =>
+    qualifyPlaceForGeocoding(location, geoHint, stops, sectionContext);
+
+  for (const location of stops) {
     throwIfAborted(signal);
-    log?.(`[trip] marker: ${location}`);
-    await mcp.callTool("createMarker", { location }, signal);
+    const query = geocode(location);
+    log?.(`[trip] marker: ${query}`);
+    await mcp.callTool("createMarker", { location: query }, signal);
   }
-  for (const route of routes) {
-    throwIfAborted(signal);
-    log?.(`[trip] path: ${route.start} → ${route.end}`);
-    await mcp.callTool("createPath", { start: route.start, end: route.end }, signal);
+  if (drawPaths) {
+    for (const route of paths) {
+      throwIfAborted(signal);
+      const start = geocode(route.start);
+      const end = geocode(route.end);
+      log?.(`[trip] path: ${start} → ${end}`);
+      await mcp.callTool("createPath", { start, end }, signal);
+    }
   }
 
   const rendered = await mcp.callTool("renderScene", {}, signal);
@@ -167,19 +205,24 @@ export async function runTripPlanner(options: RunTripPlannerOptions): Promise<Tr
   log(`[trip] "${draft.tripTitle}" — ${draft.days.length} day(s)`);
 
   progress("Building overview map…");
+  const overviewStops = sanitizeOverviewPlaces(draft.overview.places ?? []);
   const overviewScene = await buildScene(
     mcp,
-    draft.overview.places ?? [],
-    draft.overview.routes ?? [],
+    overviewStops,
+    [],
     signal,
-    log
+    log,
+    { drawPaths: false, userPrompt: prompt }
   );
 
   const days: TripPlanResult["days"] = [];
   for (const day of draft.days) {
     throwIfAborted(signal);
     progress(`Building map for day ${day.day}…`);
-    const scene = await buildScene(mcp, day.places ?? [], day.routes ?? [], signal, log);
+    const scene = await buildScene(mcp, day.places ?? [], day.routes ?? [], signal, log, {
+      userPrompt: prompt,
+      sectionContext: `${day.title} ${day.narrative}`,
+    });
     days.push({
       day: day.day,
       title: day.title,
@@ -241,7 +284,10 @@ export async function runTripFollowUp(
   const draft = parseFollowUpDraft(rawJson);
 
   progress("Refreshing the map…");
-  const scene = await buildScene(mcp, draft.places, draft.routes, signal, log);
+  const scene = await buildScene(mcp, draft.places, draft.routes, signal, log, {
+    userPrompt: `${input.tripTitle} ${userPrompt}`,
+    sectionContext: `${input.sectionTitle ?? ""} ${input.currentNarrative} ${draft.narrative}`,
+  });
 
   const message =
     input.section === "overview"

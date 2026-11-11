@@ -40,3 +40,17 @@ export type {
   TripDaySection,
   TripSection,
 } from "./trip.js";
+export {
+  distanceMeters,
+  formatDistanceMeters,
+  formatDurationSeconds,
+  pathMidpoint,
+  polylineLengthMeters,
+  samplePolyline,
+} from "./geo.js";
+export {
+  TRAFFIC_SCALE,
+  congestionColor,
+  congestionLevel,
+} from "./trafficCongestion.js";
+export type { TrafficScaleStep } from "./trafficCongestion.js";

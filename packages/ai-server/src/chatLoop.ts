@@ -124,7 +124,9 @@ export async function runChat(options: RunChatOptions): Promise<ChatResult> {
   const { signal } = context;
   const prompt = validatePrompt(options.prompt, limits);
 
-  const tools = await mcp.listTools(signal);
+  // renderScene is invoked by this loop after tools finish — exposing it to the model
+  // often makes openai/gpt-oss-20b emit invalid empty JSON and Groq rejects the turn.
+  const tools = (await mcp.listTools(signal)).filter((t) => t.name !== "renderScene");
 
   const messages: Array<Record<string, unknown>> = [
     { role: "system", content: systemPrompt },
