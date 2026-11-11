@@ -23,10 +23,12 @@ import {
   type TripChatMessage,
 } from "../trip/savedTrips.js";
 import { BudgetBreakdownView } from "./BudgetBreakdown.jsx";
+import type { TrafficStatus } from "../renderer/TrafficOverlay.js";
 import type { WeatherStatus } from "../renderer/WeatherOverlay.js";
 import { useMapRendererContext } from "../mapRendererContext.jsx";
 import { BasemapToggle } from "./BasemapToggle.jsx";
 import { SceneLegend } from "./SceneLegend.jsx";
+import { TrafficToggle } from "./TrafficToggle.jsx";
 
 type TripTab = "overview" | number;
 
@@ -63,6 +65,7 @@ export function TripPlannerView() {
   const [mapLoading, setMapLoading] = useState(true);
   const [renderer, setRenderer] = useState<MapRenderer | null>(null);
   const [weatherStatus, setWeatherStatus] = useState<WeatherStatus | null>(null);
+  const [trafficStatus, setTrafficStatus] = useState<TrafficStatus | null>(null);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
   const [followUpLoading, setFollowUpLoading] = useState(false);
@@ -88,6 +91,8 @@ export function TripPlannerView() {
     const renderer = new MapRenderer(mapContainer.current, {
       onReady: () => setMapLoading(false),
       onWeatherStatus: setWeatherStatus,
+      onTrafficStatus: setTrafficStatus,
+      authToken: AUTH_TOKEN,
     });
     rendererRef.current = renderer;
     setRenderer(renderer);
@@ -98,6 +103,7 @@ export function TripPlannerView() {
       setRenderer(null);
       setSharedRenderer(null);
       setWeatherStatus(null);
+      setTrafficStatus(null);
       renderer.destroy();
     };
   }, [setSharedRenderer]);
@@ -363,6 +369,9 @@ export function TripPlannerView() {
           )}
           <div ref={mapContainer} className="map-canvas" aria-label="Trip map" />
           <div className="map-layer-toggles">
+            {typeof activeTab === "number" && plan && (
+              <TrafficToggle renderer={renderer} scene={activeScene()} status={trafficStatus} />
+            )}
             <BasemapToggle renderer={renderer} />
           </div>
           <SceneLegend scene={activeScene()} weatherStatus={weatherStatus} />

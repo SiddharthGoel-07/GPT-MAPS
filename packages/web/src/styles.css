@@ -106,10 +106,6 @@ textarea {
   margin-left: auto;
 }
 
-.app-header-weather .segmented button {
-  padding: 6px 12px;
-}
-
 .theme-toggle {
   width: 36px;
   height: 36px;
@@ -225,6 +221,33 @@ textarea {
   box-shadow: 0 4px 16px var(--shadow);
   font-size: 13px;
   white-space: pre-line;
+}
+
+.map-status-toast {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  z-index: 10;
+  width: max-content;
+  max-width: min(400px, calc(100% - 32px));
+  padding: 10px 16px;
+  transform: translateX(-50%);
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+  border-radius: 12px;
+  box-shadow: 0 6px 20px var(--shadow-soft);
+  backdrop-filter: blur(12px);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-line;
+  max-height: min(28vh, 220px);
+  overflow-y: auto;
+  pointer-events: auto;
+}
+
+.map-status-toast .btn {
+  margin-top: 8px;
 }
 
 .trip-panel {
@@ -449,18 +472,8 @@ textarea {
 }
 
 .map-floating-stack .floating-bar,
-.map-floating-stack .floating-examples,
-.map-floating-stack .map-history-bar {
+.map-floating-stack .floating-examples {
   pointer-events: auto;
-}
-
-.map-history-bar {
-  flex-wrap: wrap;
-}
-
-.map-history-label {
-  font-size: 13px;
-  flex-shrink: 0;
 }
 
 .floating-examples {
@@ -520,6 +533,19 @@ textarea {
 
 .map-layer-toggles .segmented {
   box-shadow: 0 2px 8px var(--shadow);
+}
+
+.trip-traffic-toggle {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.traffic-toggle-hint {
+  font-size: 11px;
+  max-width: 200px;
+  text-align: right;
 }
 
 .weather-badge {

@@ -2,14 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { SceneValidationError, emptyScene, parseScene, type Scene } from "@map-renderer/shared";
 
-import {
-  clearActiveMap,
-  listSavedMaps,
-  loadActiveMap,
-  saveMap,
-  writeActiveMapId,
-  type SavedMapRecord,
-} from "../map/savedMaps.js";
+import { clearActiveMap, loadActiveMap, saveMap, type SavedMapRecord } from "../map/savedMaps.js";
 
 import {
   ChatRequestError,
@@ -49,8 +42,6 @@ export function MapView() {
     firstPrompt: "",
   });
   const restoredRef = useRef(false);
-  const [savedMaps, setSavedMaps] = useState<SavedMapRecord[]>(() => listSavedMaps());
-  const [activeMapId, setActiveMapId] = useState<string | undefined>(() => loadActiveMap()?.id);
   const { setRenderer: setSharedRenderer } = useMapRendererContext();
 
   const AI_SERVER_URL = import.meta.env.VITE_AI_SERVER_URL || "";
@@ -89,8 +80,6 @@ export function MapView() {
     setNarrative(record.narrative);
     setStatusMessage("");
     setRetryPrompt(null);
-    writeActiveMapId(record.id);
-    setActiveMapId(record.id);
   }, []);
 
   useEffect(() => {
@@ -111,23 +100,18 @@ export function MapView() {
   const persistScene = (nextScene: Scene, reply: string, promptText: string) => {
     if (nextScene.objects.length === 0) {
       clearActiveMap();
-      setActiveMapId(undefined);
-      setSavedMaps(listSavedMaps());
       return;
     }
     if (!conversation.current.firstPrompt) {
       conversation.current.firstPrompt = promptText;
     }
-    const entry = saveMap({
+    saveMap({
       id: conversation.current.id,
       originalPrompt: conversation.current.firstPrompt,
       narrative: reply,
       conversationId: conversation.current.id,
       scene: nextScene,
     });
-    writeActiveMapId(entry.id);
-    setActiveMapId(entry.id);
-    setSavedMaps(listSavedMaps());
   };
 
   const runPrompt = async (text: string) => {
@@ -206,19 +190,6 @@ export function MapView() {
     setStatusMessage("");
     setRetryPrompt(null);
     clearActiveMap();
-    setActiveMapId(undefined);
-  };
-
-  const handleLoadHistory = (id: string) => {
-    if (!id || loading) return;
-    const record = savedMaps.find((m) => m.id === id);
-    if (!record) return;
-    try {
-      applyMapRecord(record);
-    } catch (error) {
-      console.error(error);
-      setStatusMessage("That saved map could not be restored.");
-    }
   };
 
   const handleNewMap = async () => {
@@ -277,32 +248,6 @@ export function MapView() {
           </button>
         </form>
 
-        {savedMaps.length > 0 && (
-          <div
-            className="floating-bar map-history-bar"
-            style={{ maxWidth: 760, width: "100%", margin: "0 auto", alignItems: "center" }}
-          >
-            <label className="muted map-history-label" htmlFor="map-history-select">
-              History
-            </label>
-            <select
-              id="map-history-select"
-              className="field"
-              style={{ flex: 1, minWidth: 0 }}
-              value={activeMapId ?? ""}
-              disabled={loading}
-              onChange={(e) => handleLoadHistory(e.target.value)}
-            >
-              <option value="">Open a saved map…</option>
-              {savedMaps.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
         {showExamples && (
           <div className="floating-examples" aria-label="Example prompts">
             {EXAMPLE_PROMPTS.map((example) => (
@@ -320,12 +265,7 @@ export function MapView() {
       </div>
 
       {(narrative || (loading && progress) || statusMessage) && (
-        <div
-          className="toast"
-          style={{ position: "absolute", bottom: 16, left: 16, right: 16, zIndex: 10, maxWidth: 760, margin: "0 auto" }}
-          role="status"
-          aria-live="polite"
-        >
+        <div className="map-status-toast" role="status" aria-live="polite">
           {loading && progress ? progress : statusMessage || narrative}
           {!loading && retryPrompt && (
             <div style={{ marginTop: 8 }}>

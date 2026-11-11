@@ -12,6 +12,7 @@ import { describeMap } from "./mapContext.js";
 import { connectMcp } from "./mcp.js";
 import { SYSTEM_PROMPT } from "./prompt.js";
 import { RateLimiter, applyCors, checkToken, readBodyLimited } from "./security.js";
+import { buildTrafficPathSegments, proxyTrafficTile, readTomTomApiKey } from "./tomtomTraffic.js";
 
 /*
  * GROQ API KEYS (in .env): GROQ_API_KEY_1 ... GROQ_API_KEY_5
@@ -305,15 +306,68 @@ const httpServer = createHttpServer(async (req, res) => {
       return;
     }
 
+    const trafficTileMatch = /^\/api\/traffic\/tiles\/(\d+)\/(\d+)\/(\d+)\.png$/.exec(path);
+    if (req.method === "GET" && trafficTileMatch) {
+      const apiKey = readTomTomApiKey();
+      if (!apiKey) {
+        sendJson(res, 503, { error: "TomTom API key is not configured." });
+        return;
+      }
+      await proxyTrafficTile(res, trafficTileMatch[1]!, trafficTileMatch[2]!, trafficTileMatch[3]!, apiKey);
+      return;
+    }
+
     const isApi =
       path === "/api/chat" ||
       path === "/api/trip" ||
       path === "/api/trip/followup" ||
+      path === "/api/traffic/paths" ||
       path.startsWith("/api/conversations/");
     if (!isApi) return sendJson(res, 404, { error: "Not found" });
 
     const tokenProblem = checkToken(req, serverConfig);
     if (tokenProblem) return sendError(res, tokenProblem);
+
+    if (req.method === "POST" && path === "/api/traffic/paths") {
+      const apiKey = readTomTomApiKey();
+      if (!apiKey) throw new ChatError(503, "TomTom API key is not configured.");
+
+      const raw = await readBodyLimited(req, serverConfig.maxBodyBytes);
+      let body: { paths?: unknown };
+      try {
+        const parsed: unknown = JSON.parse(raw.toString("utf-8"));
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+        body = parsed as { paths?: unknown };
+      } catch {
+        throw new ChatError(400, "Request body must be a JSON object.");
+      }
+
+      if (!Array.isArray(body.paths)) {
+        throw new ChatError(400, "paths must be an array.");
+      }
+
+      const paths = body.paths
+        .filter((p): p is { id: string; coordinates: [number, number][] } => {
+          if (typeof p !== "object" || p === null) return false;
+          const row = p as { id?: unknown; coordinates?: unknown };
+          return typeof row.id === "string" && Array.isArray(row.coordinates);
+        })
+        .map((p) => ({
+          id: p.id,
+          coordinates: p.coordinates.filter(
+            (c): c is [number, number] =>
+              Array.isArray(c) &&
+              c.length === 2 &&
+              typeof c[0] === "number" &&
+              typeof c[1] === "number"
+          ),
+        }))
+        .filter((p) => p.coordinates.length >= 2);
+
+      const segments = await buildTrafficPathSegments(paths, apiKey);
+      sendJson(res, 200, { segments });
+      return;
+    }
 
     if (req.method === "DELETE" && path.startsWith("/api/conversations/")) {
       // "New map": ends the conversation and its MCP session. Idempotent.
@@ -562,6 +616,8 @@ void (async () => {
 
     httpServer.listen(port, host, () => {
       console.error(`AI Server listening on http://${host}:${port}`);
+      if (readTomTomApiKey()) console.error("[tomtom] TOMTOM_API_KEY is set (traffic API enabled).");
+      else console.error("[tomtom] TOMTOM_API_KEY is not set (live traffic disabled).");
       console.error(`[security] allowed origins: ${serverConfig.allowedOrigins.join(", ")}`);
       if (serverConfig.authToken === undefined && host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
         console.error("[security] WARNING: listening beyond this machine without AUTH_TOKEN.");

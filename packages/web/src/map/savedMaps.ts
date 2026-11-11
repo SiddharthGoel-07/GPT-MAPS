@@ -1,89 +1,66 @@
 export interface SavedMapRecord {
   id: string;
   savedAt: number;
-  label: string;
   originalPrompt: string;
   narrative: string;
   conversationId: string;
   scene: unknown;
 }
 
-const STORAGE_KEY = "gpt-maps-saved-maps";
-const ACTIVE_MAP_KEY = "gpt-maps-active-map-id";
-const MAX_SAVED = 15;
+const ACTIVE_MAP_KEY = "gpt-maps-active-map";
+/** Legacy keys from the old history dropdown — cleared when saving. */
+const LEGACY_LIST_KEY = "gpt-maps-saved-maps";
+const LEGACY_ID_KEY = "gpt-maps-active-map-id";
 
-function readRaw(): SavedMapRecord[] {
+export function loadActiveMap(): SavedMapRecord | undefined {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
+    const raw = localStorage.getItem(ACTIVE_MAP_KEY);
+    if (!raw) return loadLegacyActiveMap();
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as SavedMapRecord[]) : [];
-  } catch {
-    return [];
-  }
-}
-
-export function readActiveMapId(): string | undefined {
-  try {
-    const id = localStorage.getItem(ACTIVE_MAP_KEY);
-    return id && id.length > 0 ? id : undefined;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    return parsed as SavedMapRecord;
   } catch {
     return undefined;
   }
 }
 
-export function writeActiveMapId(id: string | undefined): void {
+function loadLegacyActiveMap(): SavedMapRecord | undefined {
   try {
-    if (id) localStorage.setItem(ACTIVE_MAP_KEY, id);
-    else localStorage.removeItem(ACTIVE_MAP_KEY);
+    const id = localStorage.getItem(LEGACY_ID_KEY);
+    const listRaw = localStorage.getItem(LEGACY_LIST_KEY);
+    if (!id || !listRaw) return undefined;
+    const list = JSON.parse(listRaw) as SavedMapRecord[];
+    if (!Array.isArray(list)) return undefined;
+    const hit = list.find((m) => m.id === id);
+    if (hit) {
+      localStorage.setItem(ACTIVE_MAP_KEY, JSON.stringify(hit));
+      localStorage.removeItem(LEGACY_LIST_KEY);
+      localStorage.removeItem(LEGACY_ID_KEY);
+    }
+    return hit;
   } catch {
-    /* ignore */
+    return undefined;
   }
 }
 
-export function listSavedMaps(): SavedMapRecord[] {
-  return readRaw().sort((a, b) => b.savedAt - a.savedAt);
-}
-
-export function loadActiveMap(): SavedMapRecord | undefined {
-  const id = readActiveMapId();
-  if (!id) return undefined;
-  return listSavedMaps().find((m) => m.id === id);
-}
-
 export function saveMap(
-  record: Omit<SavedMapRecord, "savedAt" | "label"> & { label?: string }
+  record: Omit<SavedMapRecord, "savedAt"> & { savedAt?: number }
 ): SavedMapRecord {
-  const all = readRaw();
-  const existing = all.find((m) => m.id === record.id);
-  const label =
-    record.label?.trim() ||
-    existing?.label ||
-    record.originalPrompt.trim().slice(0, 72) ||
-    "Saved map";
-
   const entry: SavedMapRecord = {
     id: record.id,
-    savedAt: Date.now(),
-    label,
-    originalPrompt: existing?.originalPrompt || record.originalPrompt,
+    savedAt: record.savedAt ?? Date.now(),
+    originalPrompt: record.originalPrompt,
     narrative: record.narrative,
     conversationId: record.conversationId,
     scene: record.scene,
   };
-
-  const without = all.filter((m) => m.id !== entry.id);
-  const next = [entry, ...without].slice(0, MAX_SAVED);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  localStorage.setItem(ACTIVE_MAP_KEY, JSON.stringify(entry));
+  localStorage.removeItem(LEGACY_LIST_KEY);
+  localStorage.removeItem(LEGACY_ID_KEY);
   return entry;
 }
 
-export function deleteSavedMap(id: string): void {
-  const next = readRaw().filter((m) => m.id !== id);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  if (readActiveMapId() === id) writeActiveMapId(undefined);
-}
-
 export function clearActiveMap(): void {
-  writeActiveMapId(undefined);
+  localStorage.removeItem(ACTIVE_MAP_KEY);
+  localStorage.removeItem(LEGACY_ID_KEY);
 }
